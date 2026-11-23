@@ -18,7 +18,6 @@ local deviceCatalog = {
 
 local WIDTH_X = 360
 local HEIGHT_Y = 465
-
 local CH_PER_PAGE = 16
 local PAGE_COUNT = 6
 local currentPage = 1
@@ -30,6 +29,8 @@ local BLUE_ACTIVE = Color3.fromRGB(45, 145, 200)
 local PATCHED_IDLE = Color3.fromRGB(32, 42, 56)
 local EMPTY_IDLE = Color3.fromRGB(26, 31, 40)
 
+local refreshUI
+
 local pages = {}
 for p = 1, PAGE_COUNT do
 	pages[p] = {}
@@ -37,10 +38,10 @@ for p = 1, PAGE_COUNT do
 		pages[p][c] = {
 			page = p,
 			chSlot = c,
-			selected = false, -- biru kalau true
+			selected = false,
 			device = nil,
 			chCount = 0,
-			dmx = 1,
+			dmx = 0,
 			universe = 1,
 		}
 	end
@@ -48,57 +49,52 @@ end
 
 pages[1][1].selected = true
 
-local onPatchChanged = function(selectedItems, activeItem, allPages)
-	-- Sambungkan ke PatchEngine / ConsoleEngine saat siap
+local onPatchChanged = function(selectedItems, firstItem, allPages)
+	-- Sambungkan ke ConsoleEngine saat siap
 end
 
--- Hitung batas channel DMX terpakai pada universe tertentu (mengabaikan target yang sedang dihitung ulang)
-local function getMaxEndAddress(universe, skipSet)
+-- Batas alamat terakhir yang terpakai di satu universe
+local function getMaxEnd(universe, skipSet)
 	local maxEnd = 0
 	for p = 1, PAGE_COUNT do
 		for c = 1, CH_PER_PAGE do
 			local key = p .. ":" .. c
-			if not (skipSet and skipSet[key]) then
-				local item = pages[p][c]
-				if item.device and item.universe == universe then
-					local endAddr = item.dmx + item.chCount - 1
-					if endAddr > maxEnd then
-						maxEnd = endAddr
-					end
+			local item = pages[p][c]
+			if not (skipSet and skipSet[key]) and item.device and item.universe == universe then
+				local endAddr = item.dmx + item.chCount - 1
+				if endAddr > maxEnd then
+					maxEnd = endAddr
 				end
 			end
 		end
 	end
-	return math.clamp(maxEnd, 0, 512)
+	return maxEnd
 end
 
--- Assign alamat DMX berurutan (001, 017, 033, dst.) ke daftar item target
+-- Kasih alamat berurutan ke semua slot target (pakai chCount tiap device)
 local function assignSequentialDmx(targets, devName, chCount)
-	if not targets or #targets == 0 then
-		return
-	end
+	if #targets == 0 then return end
 
 	local skipSet = {}
 	for _, item in ipairs(targets) do
 		skipSet[item.page .. ":" .. item.chSlot] = true
 	end
 
-	-- Kelompokkan cursor per universe agar U1 dan U2 dihitung terpisah
 	local cursors = {
-		[1] = getMaxEndAddress(1, skipSet) + 1,
-		[2] = getMaxEndAddress(2, skipSet) + 1,
+		[1] = getMaxEnd(1, skipSet) + 1,
+		[2] = getMaxEnd(2, skipSet) + 1,
 	}
 
 	for _, item in ipairs(targets) do
 		local u = (item.universe == 2) and 2 or 1
 		local useCh = chCount or (item.chCount > 0 and item.chCount or 16)
-		local startAddr = math.clamp(cursors[u], 1, 512)
+		local startAddr = cursors[u]
 
 		item.device = devName or item.device or deviceCatalog[selectedDeviceIndex].name
 		item.chCount = useCh
 		item.dmx = startAddr
 
-		cursors[u] = math.clamp(startAddr + useCh, 1, 513)
+		cursors[u] = startAddr + useCh
 	end
 end
 
@@ -110,6 +106,14 @@ local function getSelectedInCurrentPage()
 		end
 	end
 	return list
+end
+
+local function getTargets()
+	local targets = getSelectedInCurrentPage()
+	if #targets == 0 then
+		targets = { pages[currentPage][lastActiveCh] }
+	end
+	return targets
 end
 
 local screenGui = Instance.new("ScreenGui")
@@ -125,12 +129,7 @@ mainFrame.BorderSizePixel = 0
 mainFrame.Active = true
 mainFrame.Draggable = true
 mainFrame.Parent = screenGui
-
 Instance.new("UICorner", mainFrame).CornerRadius = UDim.new(0, 10)
-local mainStroke = Instance.new("UIStroke")
-mainStroke.Color = Color3.fromRGB(60, 72, 90)
-mainStroke.Thickness = 1.5
-mainStroke.Parent = mainFrame
 
 local title = Instance.new("TextLabel")
 title.Size = UDim2.new(1, -80, 0, 32)
@@ -154,23 +153,16 @@ btnMin.Font = Enum.Font.GothamBold
 btnMin.Parent = mainFrame
 Instance.new("UICorner", btnMin).CornerRadius = UDim.new(0, 5)
 
-local btnDiamond = Instance.new("TextButton")
-btnDiamond.Size = UDim2.new(0, 24, 0, 22)
-btnDiamond.Position = UDim2.new(1, -32, 0, 5)
-btnDiamond.BackgroundColor3 = Color3.fromRGB(34, 40, 50)
-btnDiamond.Text = "◇"
-btnDiamond.TextColor3 = Color3.fromRGB(220, 230, 245)
-btnDiamond.TextSize = 12
-btnDiamond.Font = Enum.Font.GothamBold
-btnDiamond.Parent = mainFrame
-Instance.new("UICorner", btnDiamond).CornerRadius = UDim.new(0, 5)
-
-local divider = Instance.new("Frame")
-divider.Size = UDim2.new(1, -16, 0, 1)
-divider.Position = UDim2.new(0, 8, 0, 32)
-divider.BackgroundColor3 = Color3.fromRGB(55, 65, 80)
-divider.BorderSizePixel = 0
-divider.Parent = mainFrame
+local btnClose = Instance.new("TextButton")
+btnClose.Size = UDim2.new(0, 24, 0, 22)
+btnClose.Position = UDim2.new(1, -32, 0, 5)
+btnClose.BackgroundColor3 = Color3.fromRGB(34, 40, 50)
+btnClose.Text = "x"
+btnClose.TextColor3 = Color3.fromRGB(220, 230, 245)
+btnClose.TextSize = 12
+btnClose.Font = Enum.Font.GothamBold
+btnClose.Parent = mainFrame
+Instance.new("UICorner", btnClose).CornerRadius = UDim.new(0, 5)
 
 local body = Instance.new("Frame")
 body.Size = UDim2.new(1, 0, 1, -34)
@@ -178,21 +170,10 @@ body.Position = UDim2.new(0, 0, 0, 34)
 body.BackgroundTransparency = 1
 body.Parent = mainFrame
 
-local btnPatch = Instance.new("TextButton")
-btnPatch.Size = UDim2.new(0, 84, 0, 26)
-btnPatch.Position = UDim2.new(0, 10, 0, 4)
-btnPatch.BackgroundColor3 = BLUE_ACTIVE
-btnPatch.Text = "Patch"
-btnPatch.TextColor3 = Color3.fromRGB(255, 255, 255)
-btnPatch.TextSize = 11
-btnPatch.Font = Enum.Font.GothamBold
-btnPatch.Parent = body
-Instance.new("UICorner", btnPatch).CornerRadius = UDim.new(0, 6)
-
--- Grid 16 Channel
+-- Grid 16 channel
 local chGridFrame = Instance.new("Frame")
 chGridFrame.Size = UDim2.new(1, -20, 0, 132)
-chGridFrame.Position = UDim2.new(0, 10, 0, 36)
+chGridFrame.Position = UDim2.new(0, 10, 0, 6)
 chGridFrame.BackgroundTransparency = 1
 chGridFrame.Parent = body
 
@@ -201,22 +182,18 @@ chGrid.CellSize = UDim2.new(0.25, -5, 0.25, -4)
 chGrid.CellPadding = UDim2.new(0, 6, 0, 5)
 chGrid.Parent = chGridFrame
 
-local chButtons = {}
-
--- 6 Paragraf / Page (P1..P6) di bawah Channel — posisi eksplisit agar anti-nyangkut di layar kecil
+-- Bar P1..P6 (di bawah grid channel)
 local pageBar = Instance.new("Frame")
 pageBar.Size = UDim2.new(1, -20, 0, 28)
-pageBar.Position = UDim2.new(0, 10, 0, 174)
+pageBar.Position = UDim2.new(0, 10, 0, 146)
 pageBar.BackgroundColor3 = Color3.fromRGB(16, 20, 26)
 pageBar.BorderSizePixel = 0
-pageBar.ZIndex = 3
 pageBar.Parent = body
 Instance.new("UICorner", pageBar).CornerRadius = UDim.new(0, 6)
 
 local pageButtons = {}
 local gap = 4
-local usableW = WIDTH_X - 20 - (gap * (PAGE_COUNT + 1))
-local btnW = math.floor(usableW / PAGE_COUNT)
+local btnW = math.floor((WIDTH_X - 20 - gap * (PAGE_COUNT + 1)) / PAGE_COUNT)
 
 for p = 1, PAGE_COUNT do
 	local pb = Instance.new("TextButton")
@@ -227,20 +204,16 @@ for p = 1, PAGE_COUNT do
 	pb.TextColor3 = Color3.fromRGB(220, 230, 245)
 	pb.TextSize = 10
 	pb.Font = Enum.Font.GothamBold
-	pb.ZIndex = 4
-	pb.Active = true
 	pb.Parent = pageBar
 	Instance.new("UICorner", pb).CornerRadius = UDim.new(0, 5)
 	pageButtons[p] = pb
 
 	pb.MouseButton1Click:Connect(function()
 		currentPage = p
-		-- Jika di page baru belum ada channel yang biru, pilih lastActiveCh secara visual
 		local hasSel = false
 		for c = 1, CH_PER_PAGE do
 			if pages[currentPage][c].selected then
 				hasSel = true
-				lastActiveCh = c
 				break
 			end
 		end
@@ -251,16 +224,15 @@ for p = 1, PAGE_COUNT do
 	end)
 end
 
--- Baris bawah 2 kolom (X): Kiri = List Device, Kanan = Detail Patch
+-- Bawah: kiri list device, kanan detail
 local bottomSplit = Instance.new("Frame")
 bottomSplit.Size = UDim2.new(1, -20, 0, 212)
-bottomSplit.Position = UDim2.new(0, 10, 0, 208)
+bottomSplit.Position = UDim2.new(0, 10, 0, 184)
 bottomSplit.BackgroundTransparency = 1
 bottomSplit.Parent = body
 
 local deviceListFrame = Instance.new("ScrollingFrame")
 deviceListFrame.Size = UDim2.new(0.46, -4, 1, 0)
-deviceListFrame.Position = UDim2.new(0, 0, 0, 0)
 deviceListFrame.BackgroundColor3 = Color3.fromRGB(16, 20, 26)
 deviceListFrame.BorderSizePixel = 0
 deviceListFrame.ScrollBarThickness = 3
@@ -313,7 +285,7 @@ lblDmxAddr.Position = UDim2.new(0, 8, 0, 44)
 lblDmxAddr.BackgroundTransparency = 1
 lblDmxAddr.Text = "Dmx 001"
 lblDmxAddr.TextColor3 = Color3.fromRGB(220, 230, 245)
-lblDmxAddr.TextSize = 12
+lblDmxAddr.TextSize = 11
 lblDmxAddr.Font = Enum.Font.GothamMedium
 lblDmxAddr.TextXAlignment = Enum.TextXAlignment.Left
 lblDmxAddr.Parent = infoPanel
@@ -344,47 +316,8 @@ btnAutoCalc.Font = Enum.Font.GothamBold
 btnAutoCalc.Parent = infoPanel
 Instance.new("UICorner", btnAutoCalc).CornerRadius = UDim.new(0, 6)
 
-local function refreshUI()
-	for p = 1, PAGE_COUNT do
-		pageButtons[p].BackgroundColor3 = (p == currentPage) and BLUE_ACTIVE or EMPTY_IDLE
-	end
-
-	local pageData = pages[currentPage]
-	local selectedList = {}
-
-	for c = 1, CH_PER_PAGE do
-		local btn = chButtons[c]
-		local item = pageData[c]
-		if item.selected then
-			table.insert(selectedList, item)
-			btn.BackgroundColor3 = BLUE_ACTIVE
-		elseif item.device then
-			btn.BackgroundColor3 = PATCHED_IDLE
-		else
-			btn.BackgroundColor3 = EMPTY_IDLE
-		end
-		btn.TextColor3 = Color3.fromRGB(255, 255, 255)
-	end
-
-	local activeItem = pageData[lastActiveCh] or pageData[1]
-	local activeDev = deviceCatalog[selectedDeviceIndex]
-
-	btnActiveDevice.Text = activeItem.device or activeDev.name
-	lblSelSummary.Text = string.format("P%d • Biru: %d", currentPage, #selectedList)
-
-	local previewDmx = activeItem.device and activeItem.dmx
-		or math.clamp(getMaxEndAddress(activeItem.universe, nil) + 1, 1, 512)
-	lblDmxAddr.Text = string.format("Dmx %03d", previewDmx)
-
-	if activeItem.universe == 1 then
-		btnUniverse.Text = "Universe 1 (touch tu u2)"
-	else
-		btnUniverse.Text = "Universe 2 (touch tu u1)"
-	end
-
-	onPatchChanged(selectedList, activeItem, pages)
-end
-
+-- Grid channel dibuat dulu supaya refreshUI punya tombolnya
+local chButtons = {}
 for c = 1, CH_PER_PAGE do
 	local b = Instance.new("TextButton")
 	b.BackgroundColor3 = EMPTY_IDLE
@@ -404,6 +337,58 @@ for c = 1, CH_PER_PAGE do
 	end)
 end
 
+refreshUI = function()
+	for p = 1, PAGE_COUNT do
+		pageButtons[p].BackgroundColor3 = (p == currentPage) and BLUE_ACTIVE or EMPTY_IDLE
+	end
+
+	local pageData = pages[currentPage]
+	local selectedItems = {}
+
+	for c = 1, CH_PER_PAGE do
+		local btn = chButtons[c]
+		local item = pageData[c]
+		if item.selected then
+			table.insert(selectedItems, item)
+			btn.BackgroundColor3 = BLUE_ACTIVE
+		elseif item.device then
+			btn.BackgroundColor3 = PATCHED_IDLE
+		else
+			btn.BackgroundColor3 = EMPTY_IDLE
+		end
+	end
+
+	local first = selectedItems[1] or pageData[lastActiveCh]
+	local lastPatched = nil
+	for _, item in ipairs(selectedItems) do
+		if item.device and item.dmx > 0 then
+			lastPatched = item
+		end
+	end
+
+	btnActiveDevice.Text = first.device or deviceCatalog[selectedDeviceIndex].name
+	lblSelSummary.Text = string.format("P%d • Biru: %d", currentPage, #selectedItems)
+
+	if first.device and first.dmx > 0 and lastPatched and lastPatched ~= first then
+		lblDmxAddr.Text = string.format("Dmx %03d..%03d", first.dmx, lastPatched.dmx + lastPatched.chCount - 1)
+	elseif first.device and first.dmx > 0 then
+		lblDmxAddr.Text = string.format("Dmx %03d", first.dmx)
+	else
+		lblDmxAddr.Text = string.format("Dmx %03d", getMaxEnd(first.universe, nil) + 1)
+	end
+
+	btnUniverse.Text = (first.universe == 1) and "Universe 1 (touch tu u2)" or "Universe 2 (touch tu u1)"
+
+	onPatchChanged(selectedItems, first, pages)
+end
+
+local function pickDevice(idx)
+	selectedDeviceIndex = idx
+	local dev = deviceCatalog[idx]
+	assignSequentialDmx(getTargets(), dev.name, dev.ch)
+	refreshUI()
+end
+
 for idx, dev in ipairs(deviceCatalog) do
 	local rowBtn = Instance.new("TextButton")
 	rowBtn.Size = UDim2.new(1, 0, 0, 24)
@@ -420,36 +405,17 @@ for idx, dev in ipairs(deviceCatalog) do
 	pad.Parent = rowBtn
 
 	rowBtn.MouseButton1Click:Connect(function()
-		selectedDeviceIndex = idx
-		local targets = getSelectedInCurrentPage()
-		if #targets == 0 then
-			targets = { pages[currentPage][lastActiveCh] }
-		end
-		assignSequentialDmx(targets, dev.name, dev.ch)
-		refreshUI()
+		pickDevice(idx)
 	end)
 end
 deviceListFrame.CanvasSize = UDim2.new(0, 0, 0, #deviceCatalog * 27 + 6)
 
 btnActiveDevice.MouseButton1Click:Connect(function()
-	selectedDeviceIndex += 1
-	if selectedDeviceIndex > #deviceCatalog then
-		selectedDeviceIndex = 1
-	end
-	local dev = deviceCatalog[selectedDeviceIndex]
-	local targets = getSelectedInCurrentPage()
-	if #targets == 0 then
-		targets = { pages[currentPage][lastActiveCh] }
-	end
-	assignSequentialDmx(targets, dev.name, dev.ch)
-	refreshUI()
+	pickDevice(selectedDeviceIndex % #deviceCatalog + 1)
 end)
 
 btnUniverse.MouseButton1Click:Connect(function()
-	local targets = getSelectedInCurrentPage()
-	if #targets == 0 then
-		targets = { pages[currentPage][lastActiveCh] }
-	end
+	local targets = getTargets()
 	for _, item in ipairs(targets) do
 		item.universe = (item.universe == 1) and 2 or 1
 	end
@@ -458,23 +424,18 @@ btnUniverse.MouseButton1Click:Connect(function()
 end)
 
 btnAutoCalc.MouseButton1Click:Connect(function()
-	local targets = getSelectedInCurrentPage()
-	if #targets == 0 then
-		targets = { pages[currentPage][lastActiveCh] }
-	end
 	local dev = deviceCatalog[selectedDeviceIndex]
-	assignSequentialDmx(targets, dev.name, dev.ch)
+	assignSequentialDmx(getTargets(), dev.name, dev.ch)
 	refreshUI()
 end)
 
 btnMin.MouseButton1Click:Connect(function()
 	isMinimized = not isMinimized
 	body.Visible = not isMinimized
-	divider.Visible = not isMinimized
 	mainFrame.Size = isMinimized and UDim2.new(0, WIDTH_X, 0, 32) or UDim2.new(0, WIDTH_X, 0, HEIGHT_Y)
 end)
 
-btnDiamond.MouseButton1Click:Connect(function()
+btnClose.MouseButton1Click:Connect(function()
 	screenGui:Destroy()
 end)
 
