@@ -2,8 +2,8 @@ local Players = game:GetService("Players")
 local player = Players.LocalPlayer
 local playerGui = player:WaitForChild("PlayerGui")
 
-if playerGui:FindFirstChild("MixerDmxUI") then
-	playerGui.MixerDmxUI:Destroy()
+if playerGui:FindFirstChild("ConsoleUI") then
+	playerGui.ConsoleUI:Destroy()
 end
 
 local deviceCatalog = {
@@ -52,11 +52,13 @@ local onPatchChanged = function(selectedItems, activeItem, allPages)
 	-- Sambungkan ke PatchEngine / ConsoleEngine saat siap
 end
 
-local function getUsedChannels(universe, skipPage, skipSlot)
+-- Hitung batas channel DMX terpakai pada universe tertentu (mengabaikan target yang sedang dihitung ulang)
+local function getMaxEndAddress(universe, skipSet)
 	local maxEnd = 0
 	for p = 1, PAGE_COUNT do
 		for c = 1, CH_PER_PAGE do
-			if not (p == skipPage and c == skipSlot) then
+			local key = p .. ":" .. c
+			if not (skipSet and skipSet[key]) then
 				local item = pages[p][c]
 				if item.device and item.universe == universe then
 					local endAddr = item.dmx + item.chCount - 1
@@ -70,9 +72,34 @@ local function getUsedChannels(universe, skipPage, skipSlot)
 	return math.clamp(maxEnd, 0, 512)
 end
 
-local function calculateNextDmx(universe, skipPage, skipSlot)
-	local used = getUsedChannels(universe, skipPage, skipSlot)
-	return math.clamp(used + 1, 1, 512)
+-- Assign alamat DMX berurutan (001, 017, 033, dst.) ke daftar item target
+local function assignSequentialDmx(targets, devName, chCount)
+	if not targets or #targets == 0 then
+		return
+	end
+
+	local skipSet = {}
+	for _, item in ipairs(targets) do
+		skipSet[item.page .. ":" .. item.chSlot] = true
+	end
+
+	-- Kelompokkan cursor per universe agar U1 dan U2 dihitung terpisah
+	local cursors = {
+		[1] = getMaxEndAddress(1, skipSet) + 1,
+		[2] = getMaxEndAddress(2, skipSet) + 1,
+	}
+
+	for _, item in ipairs(targets) do
+		local u = (item.universe == 2) and 2 or 1
+		local useCh = chCount or (item.chCount > 0 and item.chCount or 16)
+		local startAddr = math.clamp(cursors[u], 1, 512)
+
+		item.device = devName or item.device or deviceCatalog[selectedDeviceIndex].name
+		item.chCount = useCh
+		item.dmx = startAddr
+
+		cursors[u] = math.clamp(startAddr + useCh, 1, 513)
+	end
 end
 
 local function getSelectedInCurrentPage()
@@ -86,7 +113,7 @@ local function getSelectedInCurrentPage()
 end
 
 local screenGui = Instance.new("ScreenGui")
-screenGui.Name = "MixerDmxUI"
+screenGui.Name = "ConsoleUI"
 screenGui.ResetOnSpawn = false
 screenGui.Parent = playerGui
 
@@ -109,7 +136,7 @@ local title = Instance.new("TextLabel")
 title.Size = UDim2.new(1, -80, 0, 32)
 title.Position = UDim2.new(0, 12, 0, 0)
 title.BackgroundTransparency = 1
-title.Text = "Mixer dmx"
+title.Text = "Console"
 title.TextColor3 = Color3.fromRGB(240, 245, 255)
 title.TextSize = 13
 title.Font = Enum.Font.GothamBold
@@ -162,7 +189,7 @@ btnPatch.Font = Enum.Font.GothamBold
 btnPatch.Parent = body
 Instance.new("UICorner", btnPatch).CornerRadius = UDim.new(0, 6)
 
--- Grid 16 Channel (lebar X lebih lega)
+-- Grid 16 Channel
 local chGridFrame = Instance.new("Frame")
 chGridFrame.Size = UDim2.new(1, -20, 0, 132)
 chGridFrame.Position = UDim2.new(0, 10, 0, 36)
@@ -176,44 +203,58 @@ chGrid.Parent = chGridFrame
 
 local chButtons = {}
 
--- 6 Paragraf / Page di bawah Channel
+-- 6 Paragraf / Page (P1..P6) di bawah Channel — posisi eksplisit agar anti-nyangkut di layar kecil
 local pageBar = Instance.new("Frame")
-pageBar.Size = UDim2.new(1, -20, 0, 26)
+pageBar.Size = UDim2.new(1, -20, 0, 28)
 pageBar.Position = UDim2.new(0, 10, 0, 174)
 pageBar.BackgroundColor3 = Color3.fromRGB(16, 20, 26)
 pageBar.BorderSizePixel = 0
+pageBar.ZIndex = 3
 pageBar.Parent = body
 Instance.new("UICorner", pageBar).CornerRadius = UDim.new(0, 6)
 
-local pageGrid = Instance.new("UIGridLayout")
-pageGrid.CellSize = UDim2.new(1 / PAGE_COUNT, -4, 1, -4)
-pageGrid.CellPadding = UDim2.new(0, 3, 0, 0)
-pageGrid.HorizontalAlignment = Enum.HorizontalAlignment.Center
-pageGrid.VerticalAlignment = Enum.VerticalAlignment.Center
-pageGrid.Parent = pageBar
-
 local pageButtons = {}
+local gap = 4
+local usableW = WIDTH_X - 20 - (gap * (PAGE_COUNT + 1))
+local btnW = math.floor(usableW / PAGE_COUNT)
+
 for p = 1, PAGE_COUNT do
 	local pb = Instance.new("TextButton")
+	pb.Size = UDim2.new(0, btnW, 0, 22)
+	pb.Position = UDim2.new(0, gap + (p - 1) * (btnW + gap), 0, 3)
 	pb.BackgroundColor3 = EMPTY_IDLE
 	pb.Text = "P" .. p
 	pb.TextColor3 = Color3.fromRGB(220, 230, 245)
 	pb.TextSize = 10
 	pb.Font = Enum.Font.GothamBold
+	pb.ZIndex = 4
+	pb.Active = true
 	pb.Parent = pageBar
 	Instance.new("UICorner", pb).CornerRadius = UDim.new(0, 5)
 	pageButtons[p] = pb
 
 	pb.MouseButton1Click:Connect(function()
 		currentPage = p
+		-- Jika di page baru belum ada channel yang biru, pilih lastActiveCh secara visual
+		local hasSel = false
+		for c = 1, CH_PER_PAGE do
+			if pages[currentPage][c].selected then
+				hasSel = true
+				lastActiveCh = c
+				break
+			end
+		end
+		if not hasSel then
+			pages[currentPage][lastActiveCh].selected = true
+		end
 		refreshUI()
 	end)
 end
 
--- Baris bawah dibagi 2 kolom (X): Kiri = List Device, Kanan = Detail Patch
+-- Baris bawah 2 kolom (X): Kiri = List Device, Kanan = Detail Patch
 local bottomSplit = Instance.new("Frame")
-bottomSplit.Size = UDim2.new(1, -20, 0, 214)
-bottomSplit.Position = UDim2.new(0, 10, 0, 206)
+bottomSplit.Size = UDim2.new(1, -20, 0, 212)
+bottomSplit.Position = UDim2.new(0, 10, 0, 208)
 bottomSplit.BackgroundTransparency = 1
 bottomSplit.Parent = body
 
@@ -331,8 +372,9 @@ local function refreshUI()
 	btnActiveDevice.Text = activeItem.device or activeDev.name
 	lblSelSummary.Text = string.format("P%d • Biru: %d", currentPage, #selectedList)
 
-	local dmxVal = activeItem.device and activeItem.dmx or calculateNextDmx(activeItem.universe, currentPage, activeItem.chSlot)
-	lblDmxAddr.Text = string.format("Dmx %03d", dmxVal)
+	local previewDmx = activeItem.device and activeItem.dmx
+		or math.clamp(getMaxEndAddress(activeItem.universe, nil) + 1, 1, 512)
+	lblDmxAddr.Text = string.format("Dmx %03d", previewDmx)
 
 	if activeItem.universe == 1 then
 		btnUniverse.Text = "Universe 1 (touch tu u2)"
@@ -383,12 +425,7 @@ for idx, dev in ipairs(deviceCatalog) do
 		if #targets == 0 then
 			targets = { pages[currentPage][lastActiveCh] }
 		end
-
-		for _, item in ipairs(targets) do
-			item.device = dev.name
-			item.chCount = dev.ch
-			item.dmx = calculateNextDmx(item.universe, currentPage, item.chSlot)
-		end
+		assignSequentialDmx(targets, dev.name, dev.ch)
 		refreshUI()
 	end)
 end
@@ -404,11 +441,7 @@ btnActiveDevice.MouseButton1Click:Connect(function()
 	if #targets == 0 then
 		targets = { pages[currentPage][lastActiveCh] }
 	end
-	for _, item in ipairs(targets) do
-		item.device = dev.name
-		item.chCount = dev.ch
-		item.dmx = calculateNextDmx(item.universe, currentPage, item.chSlot)
-	end
+	assignSequentialDmx(targets, dev.name, dev.ch)
 	refreshUI()
 end)
 
@@ -419,10 +452,8 @@ btnUniverse.MouseButton1Click:Connect(function()
 	end
 	for _, item in ipairs(targets) do
 		item.universe = (item.universe == 1) and 2 or 1
-		if item.device then
-			item.dmx = calculateNextDmx(item.universe, currentPage, item.chSlot)
-		end
 	end
+	assignSequentialDmx(targets, nil, nil)
 	refreshUI()
 end)
 
@@ -432,13 +463,7 @@ btnAutoCalc.MouseButton1Click:Connect(function()
 		targets = { pages[currentPage][lastActiveCh] }
 	end
 	local dev = deviceCatalog[selectedDeviceIndex]
-	for _, item in ipairs(targets) do
-		if not item.device then
-			item.device = dev.name
-			item.chCount = dev.ch
-		end
-		item.dmx = calculateNextDmx(item.universe, currentPage, item.chSlot)
-	end
+	assignSequentialDmx(targets, dev.name, dev.ch)
 	refreshUI()
 end)
 
