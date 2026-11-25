@@ -1,20 +1,99 @@
--- DmxConsoleUI.lua (360x465)
+-- DmxConsoleUI_Executor.lua (360x465)
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local CoreGui = game:GetService("CoreGui")
 
-local player = Players.LocalPlayer
-local playerGui = player:WaitForChild("PlayerGui")
+local player = Players.LocalPlayer or Players.PlayerAdded:Wait()
 
--- Sesuaikan lokasi module PatchEngine.lua lu jika berbeda
-local PatchEngine = require(ReplicatedStorage:WaitForChild("PatchEngine"))
+-- Coba ambil PatchEngine dari ReplicatedStorage kalau ada, kalau nggak ada pakai fallback bawaan
+local PatchEngine
+do
+	local mod = ReplicatedStorage:FindFirstChild("PatchEngine")
+	if mod and mod:IsA("ModuleScript") then
+		local ok, res = pcall(require, mod)
+		if ok and type(res) == "table" then
+			PatchEngine = res
+		end
+	end
+end
 
--- Kumpulkan daftar nama fixture unik dari PatchEngine.Profiles
+if not PatchEngine then
+	PatchEngine = {}
+	local BarWashProfile = {
+		Group = "BarWash", Span = 8, Dimmer = 0, Shutter = 1, Red = 2, Green = 3, Blue = 4, Effect = 5, Speed = 7,
+	}
+	local ClaraS14Profile = {
+		Group = "MovingBeam", Span = 16, X = 0, Y = 1, Shutter = 6, Dimmer = 7, Effect = 11, Speed = 14,
+	}
+	PatchEngine.Profiles = {
+		["ClaraS14"] = ClaraS14Profile,
+		["Wallwasher_24X3W"] = BarWashProfile,
+		["StrobeBar_192_Segment"] = BarWashProfile,
+		["STROBE_1000W"] = { Group = "Strobe1000W", Span = 8, Dimmer = 0, Shutter = 1, Red = 2, Green = 3, Blue = 4, Effect = 5, Speed = 7 },
+		["Parled"] = { Group = "Parled", Span = 6, Dimmer = 0, Red = 1, Green = 2, Blue = 3, White = 4, Shutter = 5 },
+		["BlinderRing_2x50W"] = { Group = "Blinder", Span = 12, Dimmer = 0, Shutter = 1, Pod1Mode = 2, Pod2Mode = 3, AmberDim = 4, BacklightDim = 5, RingDim = 6, Red = 7, Green = 8, Blue = 9, Effect = 10, Speed = 11 },
+		["Blinder"] = { Group = "Blinder", Span = 8, Dimmer = 0, LED1 = 0, LED2 = 1, LED3 = 2, LED4 = 3 },
+		["Fogger"] = { Group = "Fogger", Span = 16, X = 0, Dimmer = 2, Shutter = 4, Red = 5, Green = 8, Blue = 9, Effect = 12 },
+		["Flower"] = { Group = "Flower", Span = 18, Dimmer = 0, Red = 1, Green = 2, Blue = 3, Effect = 4, Speed = 5, Shutter = 16 },
+		["Miniled"] = { Group = "MiniLed", Span = 1, Dimmer = 0 },
+		["Pixelbeambar"] = { Group = "PixelBar", Span = 20, Y = 0, Speed = 2, Effect = 3, Dimmer = 5, Shutter = 6, Red = 8, Green = 9, Blue = 10 },
+		["Retrohex"] = { Group = "RetroHex", Span = 11, Dimmer = 0, Shutter = 3, Effect = 4, Red = 6, Green = 7, Blue = 8 },
+		["Windmill"] = { Group = "Windmill", Span = 8, Dimmer = 0, Shutter = 1, Speed = 2, Effect = 3, Red = 5, Green = 6, Blue = 7 },
+	}
+	local NameAliases = {
+		["ClaraS14"] = { "claras14" },
+		["STROBE_1000W"] = { "strobe_1000w", "strobe1000", "strobo_1000w" },
+		["Wallwasher_24X3W"] = { "wallwasher_24x3w", "wallwasher" },
+		["BlinderRing_2x50W"] = { "blinderring_2x50w", "blinderring" },
+		["Pixelbeambar"] = { "pixelbeambar", "pixelbar" },
+	}
+	function PatchEngine.CountVehicleFixtures(plr, fixtureName)
+		local vehicles = workspace:FindFirstChild("Vehicles")
+		if not vehicles or not plr then return 0 end
+		local carModel = vehicles:FindFirstChild(plr.Name .. "'s Car")
+		if not carModel then
+			local lp = string.lower(plr.Name)
+			for _, c in ipairs(vehicles:GetChildren()) do
+				if string.find(string.lower(c.Name), lp, 1, true) then
+					carModel = c
+					break
+				end
+			end
+		end
+		local folder = carModel and carModel:FindFirstChild("Folder")
+		local dmxFolder = folder and folder:FindFirstChild("DmxLights")
+		if not dmxFolder then return 0 end
+		local keys = NameAliases[fixtureName] or { string.lower(fixtureName) }
+		local count = 0
+		for _, item in ipairs(dmxFolder:GetChildren()) do
+			local il = string.lower(item.Name)
+			for _, k in ipairs(keys) do
+				if il == k or string.find(il, k, 1, true) == 1 then
+					count += 1
+					break
+				end
+			end
+		end
+		return count
+	end
+end
+
+-- Hapus GUI lama kalau di-execute ulang
+local parentTarget = player:WaitForChild("PlayerGui")
+pcall(function()
+	if gethui then
+		parentTarget = gethui()
+	end
+end)
+local oldGui = parentTarget:FindFirstChild("DmxConsoleGui")
+if oldGui then oldGui:Destroy() end
+
 local fixtureNames = {}
 do
-	local seenProfiles = {}
-	for name, profile in pairs(PatchEngine.Profiles or {}) do
-		if type(profile) == "table" and not seenProfiles[profile] then
-			seenProfiles[profile] = true
+	local seen = {}
+	for name, prof in pairs(PatchEngine.Profiles or {}) do
+		if type(prof) == "table" and not seen[prof] then
+			seen[prof] = true
 			table.insert(fixtureNames, name)
 		end
 	end
@@ -25,15 +104,12 @@ do
 	end)
 end
 
--- State UI & Patch
 local state = {
-	activeTab = "patch",
 	page = 1,
 	slotsPerPage = 12,
 	fixtureIndex = 1,
 	universe = 1,
 	patchedList = {},
-	rawFixtures = {},
 }
 
 local function getSelectedFixtureName()
@@ -45,20 +121,19 @@ local function getNextFreeAddress(univ)
 	for _, item in ipairs(state.patchedList) do
 		if item.Universe == univ then
 			local endAddr = (item.Address or 1) + (item.Span or 1) - 1
-			if endAddr >= cursor then
-				cursor = endAddr + 1
-			end
+			if endAddr >= cursor then cursor = endAddr + 1 end
 		end
 	end
 	return math.clamp(cursor, 1, 512)
 end
 
--- Build ScreenGui 360x465
 local screenGui = Instance.new("ScreenGui")
 screenGui.Name = "DmxConsoleGui"
 screenGui.ResetOnSpawn = false
 screenGui.IgnoreGuiInset = true
-screenGui.Parent = playerGui
+screenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+screenGui.DisplayOrder = 999
+screenGui.Parent = parentTarget
 
 local mainFrame = Instance.new("Frame")
 mainFrame.Name = "MainWindow"
@@ -68,35 +143,27 @@ mainFrame.BackgroundColor3 = Color3.fromRGB(58, 58, 60)
 mainFrame.BorderSizePixel = 0
 mainFrame.Parent = screenGui
 
-local mainCorner = Instance.new("UICorner")
-mainCorner.CornerRadius = UDim.new(0, 18)
-mainCorner.Parent = mainFrame
+Instance.new("UICorner", mainFrame).CornerRadius = UDim.new(0, 18)
 
--- Header controls (— dan ◇)
-local topBar = Instance.new("Frame")
-topBar.Size = UDim2.new(1, -24, 0, 34)
-topBar.Position = UDim2.fromOffset(12, 8)
-topBar.BackgroundTransparency = 1
-topBar.Parent = mainFrame
-
+-- Top bar (— dan ◇)
 local minBtn = Instance.new("TextButton")
 minBtn.Size = UDim2.fromOffset(32, 26)
-minBtn.Position = UDim2.new(1, -74, 0, 4)
+minBtn.Position = UDim2.new(1, -86, 0, 10)
 minBtn.BackgroundTransparency = 1
 minBtn.Text = "—"
 minBtn.TextColor3 = Color3.fromRGB(220, 220, 224)
 minBtn.TextSize = 20
 minBtn.Font = Enum.Font.GothamBold
-minBtn.Parent = topBar
+minBtn.Parent = mainFrame
 
 local diamondBtn = Instance.new("TextButton")
-diamondBtn.Size = UDim2.fromOffset(26, 26)
-diamondBtn.Position = UDim2.new(1, -30, 0, 4)
+diamondBtn.Size = UDim2.fromOffset(24, 24)
+diamondBtn.Position = UDim2.new(1, -42, 0, 12)
 diamondBtn.BackgroundColor3 = Color3.fromRGB(165, 165, 168)
 diamondBtn.Text = ""
 diamondBtn.Rotation = 45
 diamondBtn.BorderSizePixel = 0
-diamondBtn.Parent = topBar
+diamondBtn.Parent = mainFrame
 
 local divider = Instance.new("Frame")
 divider.Size = UDim2.new(1, -24, 0, 1)
@@ -105,7 +172,7 @@ divider.BackgroundColor3 = Color3.fromRGB(150, 150, 154)
 divider.BorderSizePixel = 0
 divider.Parent = mainFrame
 
--- Tabs: patch | Preferensi | main | Setting
+-- Tabs
 local tabNames = { "patch", "Preferensi", "main", "Setting" }
 local tabButtons = {}
 local tabContainer = Instance.new("Frame")
@@ -120,9 +187,7 @@ tabLayout.HorizontalAlignment = Enum.HorizontalAlignment.Center
 tabLayout.Padding = UDim.new(0, 8)
 tabLayout.Parent = tabContainer
 
--- Body Patch Container
 local patchBody = Instance.new("Frame")
-patchBody.Name = "PatchBody"
 patchBody.Size = UDim2.new(1, -24, 1, -94)
 patchBody.Position = UDim2.fromOffset(12, 90)
 patchBody.BackgroundTransparency = 1
@@ -154,7 +219,6 @@ gridLayout.Parent = gridFrame
 local slotButtons = {}
 for i = 1, state.slotsPerPage do
 	local slot = Instance.new("TextButton")
-	slot.Name = "Slot_" .. i
 	slot.LayoutOrder = i
 	slot.BackgroundColor3 = Color3.fromRGB(72, 72, 75)
 	slot.Text = tostring(i)
@@ -164,19 +228,13 @@ for i = 1, state.slotsPerPage do
 	slot.BorderSizePixel = 0
 	slot.Parent = gridFrame
 
-	local corner = Instance.new("UICorner")
-	corner.CornerRadius = UDim.new(0, 8)
-	corner.Parent = slot
-
-	local stroke = Instance.new("UIStroke")
+	Instance.new("UICorner", slot).CornerRadius = UDim.new(0, 8)
+	local stroke = Instance.new("UIStroke", slot)
 	stroke.Color = Color3.fromRGB(32, 32, 34)
 	stroke.Thickness = 1.5
-	stroke.Parent = slot
-
 	slotButtons[i] = slot
 end
 
--- page 1 & next page >
 local pageLabel = Instance.new("TextLabel")
 pageLabel.Size = UDim2.fromOffset(90, 20)
 pageLabel.Position = UDim2.fromOffset(0, 104)
@@ -199,7 +257,6 @@ nextPageBtn.TextSize = 13
 nextPageBtn.Font = Enum.Font.Gotham
 nextPageBtn.Parent = patchBody
 
--- Tombol add fixture +
 local addFixtureBtn = Instance.new("TextButton")
 addFixtureBtn.Size = UDim2.fromOffset(104, 28)
 addFixtureBtn.Position = UDim2.new(1, -104, 0, 146)
@@ -210,27 +267,18 @@ addFixtureBtn.TextSize = 13
 addFixtureBtn.Font = Enum.Font.GothamMedium
 addFixtureBtn.BorderSizePixel = 0
 addFixtureBtn.Parent = patchBody
+Instance.new("UICorner", addFixtureBtn).CornerRadius = UDim.new(0, 8)
 
-local addCorner = Instance.new("UICorner")
-addCorner.CornerRadius = UDim.new(0, 8)
-addCorner.Parent = addFixtureBtn
-
--- Baris < Fixture name >
 local fixtureRow = Instance.new("Frame")
 fixtureRow.Size = UDim2.new(1, 0, 0, 32)
 fixtureRow.Position = UDim2.fromOffset(0, 184)
 fixtureRow.BackgroundColor3 = Color3.fromRGB(74, 74, 77)
 fixtureRow.BorderSizePixel = 0
 fixtureRow.Parent = patchBody
-
-local fixCorner = Instance.new("UICorner")
-fixCorner.CornerRadius = UDim.new(1, 0)
-fixCorner.Parent = fixtureRow
-
-local fixStroke = Instance.new("UIStroke")
+Instance.new("UICorner", fixtureRow).CornerRadius = UDim.new(1, 0)
+local fixStroke = Instance.new("UIStroke", fixtureRow)
 fixStroke.Color = Color3.fromRGB(34, 34, 36)
 fixStroke.Thickness = 1.5
-fixStroke.Parent = fixtureRow
 
 local prevFixBtn = Instance.new("TextButton")
 prevFixBtn.Size = UDim2.fromOffset(36, 32)
@@ -262,8 +310,7 @@ nextFixBtn.TextSize = 16
 nextFixBtn.Font = Enum.Font.GothamBold
 nextFixBtn.Parent = fixtureRow
 
--- Helper pill button / box
-local function createPillBox(yPos, isInput, placeholderText)
+local function createPill(yPos, isInput, textOrPlaceholder)
 	local box = Instance.new(isInput and "TextBox" or "TextButton")
 	box.Size = UDim2.new(1, 0, 0, 30)
 	box.Position = UDim2.fromOffset(0, yPos)
@@ -273,75 +320,59 @@ local function createPillBox(yPos, isInput, placeholderText)
 	box.Font = Enum.Font.GothamMedium
 	box.BorderSizePixel = 0
 	box.Parent = patchBody
-
 	if isInput then
 		box.Text = ""
-		box.PlaceholderText = placeholderText
+		box.PlaceholderText = textOrPlaceholder
 		box.PlaceholderColor3 = Color3.fromRGB(48, 48, 52)
 		box.ClearTextOnFocus = false
 	else
-		box.Text = placeholderText
+		box.Text = textOrPlaceholder
 	end
-
-	local corner = Instance.new("UICorner")
-	corner.CornerRadius = UDim.new(1, 0)
-	corner.Parent = box
-
-	local stroke = Instance.new("UIStroke")
+	Instance.new("UICorner", box).CornerRadius = UDim.new(1, 0)
+	local stroke = Instance.new("UIStroke", box)
 	stroke.Color = Color3.fromRGB(34, 34, 36)
 	stroke.Thickness = 1.5
-	stroke.Parent = box
-
 	return box
 end
 
-local countBox = createPillBox(222, true, "count fixture your add")
-local universeBtn = createPillBox(258, false, "Universe 1")
-local autoCalcBtn = createPillBox(294, false, "Auto calculate")
+local countBox = createPill(222, true, "count fixture your add")
+local universeBtn = createPill(258, false, "Universe 1")
+local autoCalcBtn = createPill(294, false, "Auto calculate")
 
--- Badge U1 • 193 di pojok kanan bawah
 local addrBadge = Instance.new("TextLabel")
 addrBadge.Size = UDim2.fromOffset(78, 24)
 addrBadge.Position = UDim2.new(1, -78, 1, -24)
 addrBadge.BackgroundColor3 = Color3.fromRGB(168, 168, 172)
-addrBadge.Text = "U" .. state.universe .. " • " .. getNextFreeAddress(state.universe)
+addrBadge.Text = "U1 • 1"
 addrBadge.TextColor3 = Color3.fromRGB(30, 30, 32)
 addrBadge.TextSize = 12
 addrBadge.Font = Enum.Font.GothamMedium
 addrBadge.BorderSizePixel = 0
 addrBadge.Parent = patchBody
+Instance.new("UICorner", addrBadge).CornerRadius = UDim.new(0, 6)
 
-local badgeCorner = Instance.new("UICorner")
-badgeCorner.CornerRadius = UDim.new(0, 6)
-badgeCorner.Parent = addrBadge
-
--- Refresh tampilan Grid, Page, Fixture, dan Badge
 local function refreshUI()
 	fixtureNameLabel.Text = getSelectedFixtureName()
 	universeBtn.Text = "Universe " .. state.universe
 	pageLabel.Text = "page " .. state.page
-
 	local startIdx = (state.page - 1) * state.slotsPerPage
 	for i = 1, state.slotsPerPage do
-		local globalIndex = startIdx + i
-		local patchedItem = state.patchedList[globalIndex]
+		local globalIdx = startIdx + i
+		local item = state.patchedList[globalIdx]
 		local btn = slotButtons[i]
-
-		if patchedItem then
-			btn.Text = tostring(patchedItem.Address)
+		if item then
+			btn.Text = tostring(item.Address)
 			btn.TextColor3 = Color3.fromRGB(240, 245, 255)
 			btn.BackgroundColor3 = Color3.fromRGB(48, 86, 132)
 		else
-			btn.Text = tostring(globalIndex)
+			btn.Text = tostring(globalIdx)
 			btn.TextColor3 = Color3.fromRGB(40, 40, 42)
 			btn.BackgroundColor3 = Color3.fromRGB(72, 72, 75)
 		end
 	end
-
 	addrBadge.Text = "U" .. state.universe .. " • " .. getNextFreeAddress(state.universe)
 end
 
--- Wiring Tab
 for _, tName in ipairs(tabNames) do
 	local btn = Instance.new("TextButton")
 	btn.Size = UDim2.fromOffset(77, 26)
@@ -350,17 +381,12 @@ for _, tName in ipairs(tabNames) do
 	btn.Font = Enum.Font.GothamMedium
 	btn.BorderSizePixel = 0
 	btn.Parent = tabContainer
-
-	local corner = Instance.new("UICorner")
-	corner.CornerRadius = UDim.new(0, 8)
-	corner.Parent = btn
-
+	Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 8)
 	tabButtons[tName] = btn
 
 	btn.MouseButton1Click:Connect(function()
-		state.activeTab = tName
 		for name, b in pairs(tabButtons) do
-			if name == state.activeTab then
+			if name == tName then
 				b.BackgroundColor3 = Color3.fromRGB(33, 134, 235)
 				b.TextColor3 = Color3.fromRGB(245, 248, 255)
 			else
@@ -368,23 +394,17 @@ for _, tName in ipairs(tabNames) do
 				b.TextColor3 = Color3.fromRGB(32, 32, 34)
 			end
 		end
-
-		local isPatch = (state.activeTab == "patch")
-		gridFrame.Visible = isPatch
-		pageLabel.Visible = isPatch
-		nextPageBtn.Visible = isPatch
-		addFixtureBtn.Visible = isPatch
-		fixtureRow.Visible = isPatch
-		countBox.Visible = isPatch
-		universeBtn.Visible = isPatch
-		autoCalcBtn.Visible = isPatch
-		addrBadge.Visible = isPatch
+		local isPatch = (tName == "patch")
+		for _, child in ipairs(patchBody:GetChildren()) do
+			if child ~= placeholderBody then
+				child.Visible = isPatch
+			end
+		end
 		placeholderBody.Visible = not isPatch
-		placeholderBody.Text = "Tab: " .. state.activeTab
+		placeholderBody.Text = "Tab: " .. tName
 	end)
 end
 
--- Set tab aktif awal ke "patch"
 for name, b in pairs(tabButtons) do
 	if name == "patch" then
 		b.BackgroundColor3 = Color3.fromRGB(33, 134, 235)
@@ -395,7 +415,6 @@ for name, b in pairs(tabButtons) do
 	end
 end
 
--- Ganti fixture (< / >)
 prevFixBtn.MouseButton1Click:Connect(function()
 	state.fixtureIndex = ((state.fixtureIndex - 2) % #fixtureNames) + 1
 	refreshUI()
@@ -406,54 +425,45 @@ nextFixBtn.MouseButton1Click:Connect(function()
 	refreshUI()
 end)
 
--- Ganti Universe 1 / Universe 2
 universeBtn.MouseButton1Click:Connect(function()
 	state.universe = (state.universe == 1) and 2 or 1
 	refreshUI()
 end)
 
--- Auto calculate -> scan DmxLights vehicle & isi countBox
 autoCalcBtn.MouseButton1Click:Connect(function()
-	local selected = getSelectedFixtureName()
-	local totalFound = PatchEngine.CountVehicleFixtures(player, selected)
-	countBox.Text = tostring(totalFound)
+	local total = PatchEngine.CountVehicleFixtures(player, getSelectedFixtureName())
+	countBox.Text = tostring(total)
 end)
 
--- add fixture + -> patch sesuai countBox
 addFixtureBtn.MouseButton1Click:Connect(function()
-	local qty = tonumber(countBox.Text)
-	if not qty or qty < 1 then
-		qty = 1
-	end
-	qty = math.floor(qty)
-
+	local qty = math.floor(tonumber(countBox.Text) or 1)
+	if qty < 1 then qty = 1 end
 	local selected = getSelectedFixtureName()
+	local prof = PatchEngine.Profiles[selected]
+	local span = (prof and prof.Span) or 8
 	for _ = 1, qty do
-		table.insert(state.rawFixtures, {
+		local nextAddr = getNextFreeAddress(state.universe)
+		table.insert(state.patchedList, {
 			Type = selected,
 			Universe = state.universe,
-			Address = nil, -- dihitung otomatis oleh PatchEngine.AutoAddress
+			Address = nextAddr,
+			Span = span,
 		})
 	end
-
-	PatchEngine.AutoAddress(state.rawFixtures, nil, 2)
-	state.patchedList = PatchEngine.PatchAll(state.rawFixtures, nil, nil, false)
 	refreshUI()
 end)
 
--- next page >
 nextPageBtn.MouseButton1Click:Connect(function()
 	local totalPages = math.max(1, math.ceil(#state.patchedList / state.slotsPerPage))
 	state.page = (state.page % totalPages) + 1
 	refreshUI()
 end)
 
--- Minimize (—) & toggle compact view (◇)
 minBtn.MouseButton1Click:Connect(function()
-	local isCollapsed = mainFrame.Size.Y.Offset <= 52
-	mainFrame.Size = isCollapsed and UDim2.fromOffset(360, 465) or UDim2.fromOffset(360, 48)
-	tabContainer.Visible = isCollapsed
-	patchBody.Visible = isCollapsed
+	local collapsed = mainFrame.Size.Y.Offset <= 52
+	mainFrame.Size = collapsed and UDim2.fromOffset(360, 465) or UDim2.fromOffset(360, 48)
+	tabContainer.Visible = collapsed
+	patchBody.Visible = collapsed
 end)
 
 diamondBtn.MouseButton1Click:Connect(function()
