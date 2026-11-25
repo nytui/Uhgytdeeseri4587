@@ -1,4 +1,4 @@
--- DmxConsoleUI_MobileDrag.lua (360x465)
+-- DmxConsoleeUI_MobileDrag.lua (360x465)
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local UserInputService = game:GetService("UserInputService")
@@ -40,16 +40,22 @@ if not PatchEngine then
 		["Retrohex"] = { Group = "RetroHex", Span = 11, Dimmer = 0, Shutter = 3, Effect = 4, Red = 6, Green = 7, Blue = 8 },
 		["Windmill"] = { Group = "Windmill", Span = 8, Dimmer = 0, Shutter = 1, Speed = 2, Effect = 3, Red = 5, Green = 6, Blue = 7 },
 	}
+
 	local NameAliases = {
-		["ClaraS14"] = { "claras14" },
-		["STROBE_1000W"] = { "strobe_1000w", "strobe1000", "strobo_1000w" },
-		["Wallwasher_24X3W"] = { "wallwasher_24x3w", "wallwasher" },
-		["BlinderRing_2x50W"] = { "blinderring_2x50w", "blinderring" },
-		["Pixelbeambar"] = { "pixelbeambar", "pixelbar" },
+		["ClaraS14"] = { "claras14", "clara_s14", "clara s14" },
+		["STROBE_1000W"] = { "strobe_1000w", "strobe1000", "strobo_1000w", "strobe 1000w" },
+		["Wallwasher_24X3W"] = { "wallwasher_24x3w", "wallwasher", "wall washer" },
+		["StrobeBar_192_Segment"] = { "strobebar_192_segment", "strobebar", "strobe bar" },
+		["BlinderRing_2x50W"] = { "blinderring_2x50w", "blinderring", "blinder ring" },
+		["Pixelbeambar"] = { "pixelbeambar", "pixelbar", "pixel beam bar" },
 	}
-	function PatchEngine.CountVehicleFixtures(plr, fixtureName)
+
+	local function getOwnDmxFolder(plr)
 		local vehicles = workspace:FindFirstChild("Vehicles")
-		if not vehicles or not plr then return 0 end
+		if not vehicles or not plr then
+			return nil
+		end
+
 		local carModel = vehicles:FindFirstChild(plr.Name .. "'s Car")
 		if not carModel then
 			local lp = string.lower(plr.Name)
@@ -60,20 +66,52 @@ if not PatchEngine then
 				end
 			end
 		end
-		local folder = carModel and carModel:FindFirstChild("Folder")
+		if not carModel then
+			return nil
+		end
+
+		local folder = carModel:FindFirstChild("Folder")
 		local dmxFolder = folder and folder:FindFirstChild("DmxLights")
-		if not dmxFolder then return 0 end
+		if not dmxFolder then
+			dmxFolder = carModel:FindFirstChild("DmxLights", true)
+		end
+
+		return dmxFolder
+	end
+
+	local function matchesAnyKey(itemName, keys)
+		local lowerName = string.lower(tostring(itemName or ""))
+		for _, k in ipairs(keys) do
+			if lowerName == k or string.find(lowerName, k, 1, true) then
+				return true
+			end
+		end
+		return false
+	end
+
+	function PatchEngine.CountVehicleFixtures(plr, fixtureName)
+		local dmxFolder = getOwnDmxFolder(plr)
+		if not dmxFolder or type(fixtureName) ~= "string" or fixtureName == "" then
+			return 0
+		end
+
 		local keys = NameAliases[fixtureName] or { string.lower(fixtureName) }
 		local count = 0
+
 		for _, item in ipairs(dmxFolder:GetChildren()) do
-			local il = string.lower(item.Name)
-			for _, k in ipairs(keys) do
-				if il == k or string.find(il, k, 1, true) == 1 then
+			if matchesAnyKey(item.Name, keys) then
+				count += 1
+			end
+		end
+
+		if count == 0 then
+			for _, desc in ipairs(dmxFolder:GetDescendants()) do
+				if matchesAnyKey(desc.Name, keys) then
 					count += 1
-					break
 				end
 			end
 		end
+
 		return count
 	end
 end
@@ -382,7 +420,7 @@ local function refreshUI()
 	pageLabel.Text = "page " .. state.page
 
 	for _, child in ipairs(channelFrame:GetChildren()) do
-		if child:IsA("GuiObject") then
+		if child:IsA("TextButton") then
 			child:Destroy()
 		end
 	end
@@ -481,7 +519,6 @@ addFixtureBtn.MouseButton1Click:Connect(function()
 	local prof = PatchEngine.Profiles[selected]
 	local span = (prof and prof.Span) or 8
 
-	-- Munculkan kotak channel sesuai jumlah count yang ditambah (misal 2 -> nambah 2 kotak)
 	state.totalChannels += qty
 	state.nextAddress = math.clamp(state.nextAddress + (qty * span), 1, 512)
 	refreshUI()
