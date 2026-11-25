@@ -1,11 +1,11 @@
--- DmxConsoleUI_Executor.lua (360x465)
+-- DmxConsoleUI_MobileDrag.lua (360x465)
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local CoreGui = game:GetService("CoreGui")
+local UserInputService = game:GetService("UserInputService")
 
 local player = Players.LocalPlayer or Players.PlayerAdded:Wait()
 
--- Coba ambil PatchEngine dari ReplicatedStorage kalau ada, kalau nggak ada pakai fallback bawaan
+-- Ambil PatchEngine dari ReplicatedStorage kalau ada, kalau tidak pakai fallback bawaan
 local PatchEngine
 do
 	local mod = ReplicatedStorage:FindFirstChild("PatchEngine")
@@ -78,7 +78,7 @@ if not PatchEngine then
 	end
 end
 
--- Hapus GUI lama kalau di-execute ulang
+-- Bersihkan GUI lama jika di-execute ulang
 local parentTarget = player:WaitForChild("PlayerGui")
 pcall(function()
 	if gethui then
@@ -109,22 +109,12 @@ local state = {
 	slotsPerPage = 12,
 	fixtureIndex = 1,
 	universe = 1,
-	patchedList = {},
+	totalChannels = 0,
+	nextAddress = 1,
 }
 
 local function getSelectedFixtureName()
 	return fixtureNames[state.fixtureIndex] or "ClaraS14"
-end
-
-local function getNextFreeAddress(univ)
-	local cursor = 1
-	for _, item in ipairs(state.patchedList) do
-		if item.Universe == univ then
-			local endAddr = (item.Address or 1) + (item.Span or 1) - 1
-			if endAddr >= cursor then cursor = endAddr + 1 end
-		end
-	end
-	return math.clamp(cursor, 1, 512)
 end
 
 local screenGui = Instance.new("ScreenGui")
@@ -141,11 +131,61 @@ mainFrame.Size = UDim2.fromOffset(360, 465)
 mainFrame.Position = UDim2.new(0.5, -180, 0.5, -232.5)
 mainFrame.BackgroundColor3 = Color3.fromRGB(58, 58, 60)
 mainFrame.BorderSizePixel = 0
+mainFrame.Active = true
 mainFrame.Parent = screenGui
 
 Instance.new("UICorner", mainFrame).CornerRadius = UDim.new(0, 18)
 
--- Top bar (— dan ◇)
+-- Drag handle di area top bar agar mulus di mobile tanpa bentrok tombol bawah
+local dragBar = Instance.new("Frame")
+dragBar.Name = "DragBar"
+dragBar.Size = UDim2.new(1, 0, 0, 44)
+dragBar.Position = UDim2.fromOffset(0, 0)
+dragBar.BackgroundTransparency = 1
+dragBar.Active = true
+dragBar.Parent = mainFrame
+
+do
+	local dragging = false
+	local dragInput = nil
+	local dragStart = Vector2.zero
+	local startPos = UDim2.new()
+
+	dragBar.InputBegan:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.Touch or input.UserInputType == Enum.UserInputType.MouseButton1 then
+			dragging = true
+			dragStart = Vector2.new(input.Position.X, input.Position.Y)
+			startPos = mainFrame.Position
+			dragInput = input
+
+			input.Changed:Connect(function()
+				if input.UserInputState == Enum.UserInputState.End then
+					dragging = false
+				end
+			end)
+		end
+	end)
+
+	dragBar.InputChanged:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.Touch or input.UserInputType == Enum.UserInputType.MouseMovement then
+			dragInput = input
+		end
+	end)
+
+	UserInputService.InputChanged:Connect(function(input)
+		if dragging and input == dragInput then
+			local delta = Vector2.new(input.Position.X, input.Position.Y) - dragStart
+			mainFrame.Position = UDim2.new(
+				startPos.X.Scale,
+				startPos.X.Offset + delta.X,
+				startPos.Y.Scale,
+				startPos.Y.Offset + delta.Y
+			)
+		end
+	end)
+end
+
+-- Top bar buttons (— dan ◇)
 local minBtn = Instance.new("TextButton")
 minBtn.Size = UDim2.fromOffset(32, 26)
 minBtn.Position = UDim2.new(1, -86, 0, 10)
@@ -154,7 +194,7 @@ minBtn.Text = "—"
 minBtn.TextColor3 = Color3.fromRGB(220, 220, 224)
 minBtn.TextSize = 20
 minBtn.Font = Enum.Font.GothamBold
-minBtn.Parent = mainFrame
+minBtn.Parent = dragBar
 
 local diamondBtn = Instance.new("TextButton")
 diamondBtn.Size = UDim2.fromOffset(24, 24)
@@ -163,7 +203,7 @@ diamondBtn.BackgroundColor3 = Color3.fromRGB(165, 165, 168)
 diamondBtn.Text = ""
 diamondBtn.Rotation = 45
 diamondBtn.BorderSizePixel = 0
-diamondBtn.Parent = mainFrame
+diamondBtn.Parent = dragBar
 
 local divider = Instance.new("Frame")
 divider.Size = UDim2.new(1, -24, 0, 1)
@@ -202,38 +242,23 @@ placeholderBody.Font = Enum.Font.GothamMedium
 placeholderBody.Visible = false
 placeholderBody.Parent = patchBody
 
--- Grid 1..12 bersih tanpa label singkatan atas
-local gridFrame = Instance.new("Frame")
-gridFrame.Size = UDim2.new(1, 0, 0, 96)
-gridFrame.Position = UDim2.fromOffset(0, 2)
-gridFrame.BackgroundTransparency = 1
-gridFrame.Parent = patchBody
+-- Area atas: awalnya kosong, terisi kotak channel berurutan 1, 2, 3... saat add fixture +
+local channelFrame = Instance.new("ScrollingFrame")
+channelFrame.Name = "ChannelContainer"
+channelFrame.Size = UDim2.new(1, 0, 0, 96)
+channelFrame.Position = UDim2.fromOffset(0, 2)
+channelFrame.BackgroundTransparency = 1
+channelFrame.ScrollBarThickness = 3
+channelFrame.CanvasSize = UDim2.fromOffset(0, 0)
+channelFrame.AutomaticCanvasSize = Enum.AutomaticSize.Y
+channelFrame.Parent = patchBody
 
-local gridLayout = Instance.new("UIGridLayout")
-gridLayout.CellSize = UDim2.fromOffset(49, 43)
-gridLayout.CellPadding = UDim2.fromOffset(6.5, 8)
-gridLayout.FillDirection = Enum.FillDirection.Horizontal
-gridLayout.SortOrder = Enum.SortOrder.LayoutOrder
-gridLayout.Parent = gridFrame
-
-local slotButtons = {}
-for i = 1, state.slotsPerPage do
-	local slot = Instance.new("TextButton")
-	slot.LayoutOrder = i
-	slot.BackgroundColor3 = Color3.fromRGB(72, 72, 75)
-	slot.Text = tostring(i)
-	slot.TextColor3 = Color3.fromRGB(40, 40, 42)
-	slot.TextSize = 15
-	slot.Font = Enum.Font.GothamBold
-	slot.BorderSizePixel = 0
-	slot.Parent = gridFrame
-
-	Instance.new("UICorner", slot).CornerRadius = UDim.new(0, 8)
-	local stroke = Instance.new("UIStroke", slot)
-	stroke.Color = Color3.fromRGB(32, 32, 34)
-	stroke.Thickness = 1.5
-	slotButtons[i] = slot
-end
+local channelGrid = Instance.new("UIGridLayout")
+channelGrid.CellSize = UDim2.fromOffset(49, 43)
+channelGrid.CellPadding = UDim2.fromOffset(6.5, 8)
+channelGrid.FillDirection = Enum.FillDirection.Horizontal
+channelGrid.SortOrder = Enum.SortOrder.LayoutOrder
+channelGrid.Parent = channelFrame
 
 local pageLabel = Instance.new("TextLabel")
 pageLabel.Size = UDim2.fromOffset(90, 20)
@@ -355,22 +380,35 @@ local function refreshUI()
 	fixtureNameLabel.Text = getSelectedFixtureName()
 	universeBtn.Text = "Universe " .. state.universe
 	pageLabel.Text = "page " .. state.page
-	local startIdx = (state.page - 1) * state.slotsPerPage
-	for i = 1, state.slotsPerPage do
-		local globalIdx = startIdx + i
-		local item = state.patchedList[globalIdx]
-		local btn = slotButtons[i]
-		if item then
-			btn.Text = tostring(item.Address)
-			btn.TextColor3 = Color3.fromRGB(240, 245, 255)
-			btn.BackgroundColor3 = Color3.fromRGB(48, 86, 132)
-		else
-			btn.Text = tostring(globalIdx)
-			btn.TextColor3 = Color3.fromRGB(40, 40, 42)
-			btn.BackgroundColor3 = Color3.fromRGB(72, 72, 75)
+
+	for _, child in ipairs(channelFrame:GetChildren()) do
+		if child:IsA("GuiObject") then
+			child:Destroy()
 		end
 	end
-	addrBadge.Text = "U" .. state.universe .. " • " .. getNextFreeAddress(state.universe)
+
+	local startCh = (state.page - 1) * state.slotsPerPage + 1
+	local endCh = math.min(state.totalChannels, state.page * state.slotsPerPage)
+
+	for ch = startCh, endCh do
+		local card = Instance.new("TextButton")
+		card.Name = "Ch_" .. ch
+		card.LayoutOrder = ch - startCh + 1
+		card.BackgroundColor3 = Color3.fromRGB(72, 72, 75)
+		card.Text = tostring(ch)
+		card.TextColor3 = Color3.fromRGB(240, 245, 255)
+		card.TextSize = 14
+		card.Font = Enum.Font.GothamBold
+		card.BorderSizePixel = 0
+		card.Parent = channelFrame
+
+		Instance.new("UICorner", card).CornerRadius = UDim.new(0, 8)
+		local stroke = Instance.new("UIStroke", card)
+		stroke.Color = Color3.fromRGB(32, 32, 34)
+		stroke.Thickness = 1.5
+	end
+
+	addrBadge.Text = "U" .. state.universe .. " • " .. state.nextAddress
 end
 
 for _, tName in ipairs(tabNames) do
@@ -438,23 +476,19 @@ end)
 addFixtureBtn.MouseButton1Click:Connect(function()
 	local qty = math.floor(tonumber(countBox.Text) or 1)
 	if qty < 1 then qty = 1 end
+
 	local selected = getSelectedFixtureName()
 	local prof = PatchEngine.Profiles[selected]
 	local span = (prof and prof.Span) or 8
-	for _ = 1, qty do
-		local nextAddr = getNextFreeAddress(state.universe)
-		table.insert(state.patchedList, {
-			Type = selected,
-			Universe = state.universe,
-			Address = nextAddr,
-			Span = span,
-		})
-	end
+
+	-- Tambah channel berurutan 1, 2, 3... sesuai jumlah fixture x span
+	state.totalChannels += qty * span
+	state.nextAddress = math.clamp(state.nextAddress + (qty * span), 1, 512)
 	refreshUI()
 end)
 
 nextPageBtn.MouseButton1Click:Connect(function()
-	local totalPages = math.max(1, math.ceil(#state.patchedList / state.slotsPerPage))
+	local totalPages = math.max(1, math.ceil(state.totalChannels / state.slotsPerPage))
 	state.page = (state.page % totalPages) + 1
 	refreshUI()
 end)
