@@ -481,8 +481,8 @@ addFixtureBtn.MouseButton1Click:Connect(function()
 	local prof = PatchEngine.Profiles[selected]
 	local span = (prof and prof.Span) or 8
 
-	-- Tambah channel berurutan 1, 2, 3... sesuai jumlah fixture x span
-	state.totalChannels += qty * span
+	-- Munculkan kotak channel sesuai jumlah count yang ditambah (misal 2 -> nambah 2 kotak)
+	state.totalChannels += qty
 	state.nextAddress = math.clamp(state.nextAddress + (qty * span), 1, 512)
 	refreshUI()
 end)
