@@ -1,4 +1,4 @@
--- DmxConsoleeUI_MobileDrag.lua (360x465)
+-- DmxConsoleUI_MobileDrag.lua (360x465)
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local UserInputService = game:GetService("UserInputService")
@@ -223,25 +223,26 @@ do
 	end)
 end
 
--- Top bar buttons (— dan ◇)
+-- Top bar buttons minimalis (— dan ×)
 local minBtn = Instance.new("TextButton")
-minBtn.Size = UDim2.fromOffset(32, 26)
-minBtn.Position = UDim2.new(1, -86, 0, 10)
+minBtn.Size = UDim2.fromOffset(28, 28)
+minBtn.Position = UDim2.new(1, -74, 0, 8)
 minBtn.BackgroundTransparency = 1
 minBtn.Text = "—"
-minBtn.TextColor3 = Color3.fromRGB(220, 220, 224)
-minBtn.TextSize = 20
-minBtn.Font = Enum.Font.GothamBold
+minBtn.TextColor3 = Color3.fromRGB(200, 200, 205)
+minBtn.TextSize = 16
+minBtn.Font = Enum.Font.Gotham
 minBtn.Parent = dragBar
 
-local diamondBtn = Instance.new("TextButton")
-diamondBtn.Size = UDim2.fromOffset(24, 24)
-diamondBtn.Position = UDim2.new(1, -42, 0, 12)
-diamondBtn.BackgroundColor3 = Color3.fromRGB(165, 165, 168)
-diamondBtn.Text = ""
-diamondBtn.Rotation = 45
-diamondBtn.BorderSizePixel = 0
-diamondBtn.Parent = dragBar
+local closeBtn = Instance.new("TextButton")
+closeBtn.Size = UDim2.fromOffset(28, 28)
+closeBtn.Position = UDim2.new(1, -40, 0, 8)
+closeBtn.BackgroundTransparency = 1
+closeBtn.Text = "×"
+closeBtn.TextColor3 = Color3.fromRGB(200, 200, 205)
+closeBtn.TextSize = 19
+closeBtn.Font = Enum.Font.Gotham
+closeBtn.Parent = dragBar
 
 local divider = Instance.new("Frame")
 divider.Size = UDim2.new(1, -24, 0, 1)
@@ -537,9 +538,10 @@ minBtn.MouseButton1Click:Connect(function()
 	patchBody.Visible = collapsed
 end)
 
-diamondBtn.MouseButton1Click:Connect(function()
-	state.page = 1
-	refreshUI()
+closeBtn.MouseButton1Click:Connect(function()
+	if screenGui then
+		screenGui:Destroy()
+	end
 end)
 
 refreshUI()
