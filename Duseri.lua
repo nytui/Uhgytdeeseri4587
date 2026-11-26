@@ -1,7 +1,7 @@
--- DmxConsoleUI_SnapSwipe.lua
+-- DmxConsoleUI_SnapSwipe_Full.lua
 -- Ukuran tetap normal (350x340) + Snap Swipe atas/bawah ala TikTok/Shorts
 -- Tema gelap + Preferensi (Pan/Tilt + number° + fader) + No Auto-Gate on Select + Devices Power di Setting
--- Mendukung Universe 1 (3-byte buffer) & Universe 2 ({ [2] = buf512 }) sesuai Setup
+-- Auto-spill > 512 generik ke Universe 2 + Transport U1 (3-byte) & U2 ({ [2] = buf512 })
 
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -92,69 +92,6 @@ local function toAbsChannel(address, offset0, maxChannels)
 	if offset0 < 0 or offset0 >= (maxChannels or MAX_CHANNELS) then return nil end
 	local ch = math.floor(address + offset0)
 	return (ch >= 1 and ch <= MAX_CHANNELS) and ch or nil
-end
-
-local function autoAddressByUniv(fixtures, maxUniverses)
-	local limitUniv = maxUniverses or DEFAULT_MAX_UNIVERSES
-	local cursors = {}
-	for u = 1, limitUniv do cursors[u] = 1 end
-	local overflow = {}
-	for _, fix in ipairs(fixtures or {}) do
-		local univ = math.clamp(math.floor(tonumber(fix.Universe) or 1), 1, limitUniv)
-		fix.Universe = univ
-		local prof = PatchEngine.Profiles[fix.Type]
-		local span = (prof and prof.Span) or 8
-		fix.Span = span
-		if cursors[univ] + span - 1 <= MAX_CHANNELS then
-			fix.Address = cursors[univ]
-			cursors[univ] = fix.Address + span
-			fix.Overflow = false
-		else
-			fix.Overflow = true
-			table.insert(overflow, fix)
-		end
-	end
-	return fixtures, overflow
-end
-
-function PatchEngine.PatchAll(fixtures, universeFilter, autoAddress, maxUniverses)
-	local overflow = {}
-	if autoAddress then
-		_, overflow = autoAddressByUniv(fixtures, maxUniverses or DEFAULT_MAX_UNIVERSES)
-	end
-	local patched = {}
-	for _, fix in ipairs(fixtures or {}) do
-		local fixUniv = fix.Universe or 1
-		if not fix.Overflow and (not universeFilter or fixUniv == universeFilter) then
-			local prof = PatchEngine.Profiles[fix.Type] or {}
-			local span = prof.Span or 8
-			local addr = fix.Address or 1
-			table.insert(patched, {
-				Address = addr,
-				EndAddress = math.min(MAX_CHANNELS, addr + span - 1),
-				Span = span,
-				Universe = fixUniv,
-				Type = fix.Type,
-				Channels = {
-					X = toAbsChannel(addr, prof.X, span),
-					Y = toAbsChannel(addr, prof.Y, span),
-					PanFine = toAbsChannel(addr, prof.PanFine, span),
-					TiltFine = toAbsChannel(addr, prof.TiltFine, span),
-					Shutter = toAbsChannel(addr, prof.Shutter, span),
-					Dimmer = toAbsChannel(addr, prof.Dimmer or 0, span),
-					Color = toAbsChannel(addr, prof.Color, span),
-					Gobo = toAbsChannel(addr, prof.Gobo, span),
-					Prism = toAbsChannel(addr, prof.Prism or prof.Effect, span),
-					Focus = toAbsChannel(addr, prof.Focus, span),
-					Speed = toAbsChannel(addr, prof.Speed or prof.GoboRotation, span),
-					Red = toAbsChannel(addr, prof.Red, span),
-					Green = toAbsChannel(addr, prof.Green, span),
-					Blue = toAbsChannel(addr, prof.Blue, span),
-				},
-			})
-		end
-	end
-	return patched, overflow
 end
 
 -- ============================================================================
@@ -344,6 +281,8 @@ do
 	end)
 end
 
+local allRawFixtures = {}
+
 local state = {
 	activeTab = "patch",
 	page = 1,
@@ -357,7 +296,7 @@ local state = {
 	patchedByUniv = { [1] = {}, [2] = {} },
 	nextAddress = 1,
 	devicesPowerOn = false,
-	reelIndex = 1, -- 1 = Reel Utama (Grid + Tab), 2 = Reel Cepat (Power + Status + Quick Action)
+	reelIndex = 1,
 }
 
 local addrBadge
@@ -384,7 +323,7 @@ local function resolveFixtureForBox(boxIdx)
 	end
 	local profName = getSelectedFixtureName()
 	local prof = PatchEngine.Profiles[profName] or {}
-	local span = prof.Span or 16
+	local span = math.clamp(math.floor(tonumber(prof.Span) or 8), 1, MAX_CHANNELS)
 	local fallbackAddr = math.clamp((boxIdx - 1) * span + 1, 1, MAX_CHANNELS)
 	return {
 		Address = fallbackAddr,
@@ -467,7 +406,7 @@ local function applyAxisToSelected(dmxVal)
 		if isSel then
 			local fix = resolveFixtureForBox(boxIdx)
 			local targetCh = (fix.Channels and fix.Channels[roleKey])
-				or toAbsChannel(fix.Address, fallbackOff1 - 1, fix.Span or 16)
+				or toAbsChannel(fix.Address, fallbackOff1 - 1, fix.Span or 8)
 			if targetCh and not seen[targetCh] then
 				seen[targetCh] = true
 				transport:SendChannel(u, targetCh, clamped, false)
@@ -476,6 +415,70 @@ local function applyAxisToSelected(dmxVal)
 	end
 
 	updateBadge()
+end
+
+local function rebuildAllUniverses()
+	for u = 1, DEFAULT_MAX_UNIVERSES do
+		state.rawByUniv[u] = {}
+		state.patchedByUniv[u] = {}
+		state.addedCountByUniv[u] = 0
+	end
+
+	local cursors = { [1] = 1, [2] = 1 }
+
+	for _, fix in ipairs(allRawFixtures) do
+		local prof = PatchEngine.Profiles[fix.Type] or {}
+		local span = math.clamp(math.floor(tonumber(prof.Span) or 8), 1, MAX_CHANNELS)
+		local targetUniv = (tonumber(fix.Universe) == 2) and 2 or 1
+
+		-- Aturan generik: kalau di Universe 1 melebihi 512 channel, otomatis lompat ke Universe 2
+		if targetUniv == 1 and (cursors[1] + span - 1 > MAX_CHANNELS) then
+			targetUniv = 2
+		end
+
+		if cursors[targetUniv] + span - 1 <= MAX_CHANNELS then
+			local addr = cursors[targetUniv]
+			cursors[targetUniv] = addr + span
+			fix.Universe = targetUniv
+			fix.Address = addr
+
+			table.insert(state.rawByUniv[targetUniv], fix)
+			table.insert(state.patchedByUniv[targetUniv], {
+				Address = addr,
+				EndAddress = addr + span - 1,
+				Span = span,
+				Universe = targetUniv,
+				Type = fix.Type,
+				Channels = {
+					X = toAbsChannel(addr, prof.X, span),
+					Y = toAbsChannel(addr, prof.Y, span),
+					PanFine = toAbsChannel(addr, prof.PanFine, span),
+					TiltFine = toAbsChannel(addr, prof.TiltFine, span),
+					Shutter = toAbsChannel(addr, prof.Shutter, span),
+					Dimmer = toAbsChannel(addr, prof.Dimmer or 0, span),
+					Color = toAbsChannel(addr, prof.Color, span),
+					Gobo = toAbsChannel(addr, prof.Gobo, span),
+					Prism = toAbsChannel(addr, prof.Prism or prof.Effect, span),
+					Focus = toAbsChannel(addr, prof.Focus, span),
+					Speed = toAbsChannel(addr, prof.Speed or prof.GoboRotation, span),
+					Red = toAbsChannel(addr, prof.Red, span),
+					Green = toAbsChannel(addr, prof.Green, span),
+					Blue = toAbsChannel(addr, prof.Blue, span),
+				},
+			})
+			state.addedCountByUniv[targetUniv] += 1
+		end
+	end
+
+	local curU = state.universe
+	local curPatched = state.patchedByUniv[curU] or {}
+	local highestEnd = 0
+	for _, item in ipairs(curPatched) do
+		if (item.EndAddress or 0) > highestEnd then
+			highestEnd = item.EndAddress
+		end
+	end
+	state.nextAddress = math.clamp(highestEnd + 1, 1, MAX_CHANNELS)
 end
 
 local screenGui = Instance.new("ScreenGui")
@@ -582,7 +585,7 @@ topLine.BackgroundColor3 = THEME.divider
 topLine.BorderSizePixel = 0
 topLine.Parent = mainFrame
 
--- Reel Viewport (Clipped area untuk snap-swipe ala TikTok/Shorts)
+-- Reel Viewport
 local reelViewport = Instance.new("Frame")
 reelViewport.Name = "ReelViewport"
 reelViewport.Size = UDim2.new(1, -24, 1, -46)
@@ -1099,10 +1102,10 @@ local function refreshUI()
 		table.insert(addrs, tostring(resolveFixtureForBox(boxIdx).Address))
 	end
 	local statusStr = "Universe: U" .. state.universe .. (state.universe == 2 and " (512B)" or " (3B)")
+		.. "\nU1/U2 Count: " .. (state.addedCountByUniv[1] or 0) .. " / " .. (state.addedCountByUniv[2] or 0)
 		.. "\nSelected Box: " .. ((#selList > 0) and table.concat(selList, ", ") or "None")
 		.. "\nStart Addr: " .. ((#addrs > 0) and table.concat(addrs, ", ") or "None")
 		.. "\nDevices Power: " .. (state.devicesPowerOn and "ON" or "OFF")
-		.. "\nRemote: " .. (transport.DataRemote and transport.DataRemote:GetFullName() or "Waiting " .. REMOTE_NAME .. "...")
 
 	mainPage.Text = statusStr
 	reel2StatusCard.Text = "  " .. string.gsub(statusStr, "\n", "\n  ")
@@ -1154,6 +1157,7 @@ universeBtn.MouseButton1Click:Connect(function()
 	state.universe = (state.universe == 1) and 2 or 1
 	state.page = 1
 	state.selectedBoxes = {}
+	rebuildAllUniverses()
 	refreshUI()
 end)
 
@@ -1175,24 +1179,13 @@ addFixtureBtn.MouseButton1Click:Connect(function()
 	local qty = math.max(1, math.floor(tonumber(countBox.Text) or 1))
 	local fixName = getSelectedFixtureName()
 	for _ = 1, qty do
-		table.insert(state.rawByUniv[state.universe], {
+		table.insert(allRawFixtures, {
 			Type = fixName,
 			Universe = state.universe,
 		})
 	end
 
-	local patched = PatchEngine.PatchAll(state.rawByUniv[state.universe], state.universe, true, DEFAULT_MAX_UNIVERSES)
-	state.patchedByUniv[state.universe] = patched
-
-	local highestEnd = 0
-	for _, item in ipairs(patched) do
-		if (item.EndAddress or 0) > highestEnd then
-			highestEnd = item.EndAddress
-		end
-	end
-	state.nextAddress = math.clamp(highestEnd + 1, 1, MAX_CHANNELS)
-	state.addedCountByUniv[state.universe] = (state.addedCountByUniv[state.universe] or 0) + qty
-
+	rebuildAllUniverses()
 	refreshUI()
 end)
 
@@ -1214,15 +1207,17 @@ tiltBtn.MouseButton1Click:Connect(function()
 end)
 
 local function resetPatchState()
-	local u = state.universe
-	state.rawByUniv[u] = {}
-	state.patchedByUniv[u] = {}
-	state.addedCountByUniv[u] = 0
+	allRawFixtures = {}
+	for u = 1, DEFAULT_MAX_UNIVERSES do
+		state.rawByUniv[u] = {}
+		state.patchedByUniv[u] = {}
+		state.addedCountByUniv[u] = 0
+		transport:ClearUniverse(u)
+	end
 	state.selectedBoxes = {}
 	state.devicesPowerOn = false
 	state.nextAddress = 1
 	state.page = 1
-	transport:ClearUniverse(u)
 	refreshUI()
 end
 
