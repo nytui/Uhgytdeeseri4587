@@ -1,9 +1,10 @@
--- DmxConsoleUI_Synced.lua (360x465)
--- Kotak di patch & Preferensi sinkron 1:1 (Box 1 -> Addr 1, Box 2 -> Addr 17, dst.)
--- Multi-select + Pan/Tilt + number° + fader + 16-ch FX -> buffer.create(3) ke UDP_DMXDATA
+-- DmxConsoleUI_SnapSwipe.lua
+-- Ukuran tetap normal (350x340) + Snap Swipe atas/bawah ala TikTok/Shorts
+-- Tema gelap + Preferensi (Pan/Tilt + number° + fader) + No Auto-Gate on Select + Devices Power di Setting
 
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local TweenService = game:GetService("TweenService")
 local UserInputService = game:GetService("UserInputService")
 local Workspace = game:GetService("Workspace")
 
@@ -30,9 +31,6 @@ if not PatchEngine.Profiles then
 	local BarWashProfile = {
 		Group = "BarWash", Span = 8, Dimmer = 0, Shutter = 1, Red = 2, Green = 3, Blue = 4, Effect = 5, Speed = 7,
 	}
-	-- 16-Ch ClaraS14 (0-based offsets):
-	-- CH 1 (0): Pan | CH 2 (1): Tilt | CH 7 (6): Shutter | CH 8 (7): Dimmer
-	-- CH 9 (8): Color | CH 10 (9): Gobo | CH 12 (11): Prism | CH 13 (12): Focus | CH 15 (14): Rot/Spd
 	local ClaraS14Profile = {
 		Group = "MovingBeam",
 		Span = 16,
@@ -255,13 +253,29 @@ end
 local transport = DmxTransport.new(player)
 
 -- ============================================================================
--- UI (360x465)
+-- DARK THEME UI (350x340 - UKURAN NORMAL + TIKTOK/SHORTS SNAP SWIPE)
 -- ============================================================================
+local THEME = {
+	bg = Color3.fromRGB(24, 25, 29),
+	surface = Color3.fromRGB(38, 40, 46),
+	surfaceAlt = Color3.fromRGB(48, 51, 58),
+	stroke = Color3.fromRGB(58, 62, 70),
+	divider = Color3.fromRGB(46, 49, 56),
+	accent = Color3.fromRGB(11, 136, 153),
+	primary = Color3.fromRGB(33, 134, 235),
+	text = Color3.fromRGB(236, 238, 244),
+	muted = Color3.fromRGB(154, 160, 172),
+	track = Color3.fromRGB(64, 68, 76),
+	badgeBg = Color3.fromRGB(44, 47, 54),
+}
+
+local WIN_W, WIN_H = 350, 340
+
 local parentTarget = player:WaitForChild("PlayerGui")
 pcall(function()
 	if gethui then parentTarget = gethui() end
 end)
-local oldGui = parentTarget:FindFirstChild("DmxConsoleSyncedGui")
+local oldGui = parentTarget:FindFirstChild("DmxConsoleSnapGui")
 if oldGui then oldGui:Destroy() end
 
 local fixtureNames = {}
@@ -287,17 +301,13 @@ local state = {
 	universe = 1,
 	fixtureIndex = 1,
 	addedCountByUniv = { [1] = 0, [2] = 0 },
-	selectedBoxes = {}, -- nomor kotak (1, 2, ...) yang dipilih
+	selectedBoxes = {},
 	axisMode = "Pan",
 	rawByUniv = { [1] = {}, [2] = {} },
 	patchedByUniv = { [1] = {}, [2] = {} },
 	nextAddress = 1,
-	autoOpenGate = true,
-	colorStep = 1,
-	goboStep = 0,
-	prismStep = 0,
-	focusVal = 0,
-	rotVal = 0,
+	devicesPowerOn = false,
+	reelIndex = 1, -- 1 = Reel Utama (Grid + Tab), 2 = Reel Cepat (Power + Status + Quick Action)
 }
 
 local addrBadge
@@ -322,34 +332,37 @@ local function resolveFixtureForBox(boxIdx)
 	if patched[boxIdx] then
 		return patched[boxIdx]
 	end
-	-- Fallback start address 16-ch: Box 1 -> 1, Box 2 -> 17
-	local fallbackAddr = (boxIdx - 1) * 16 + 1
+	local profName = getSelectedFixtureName()
+	local prof = PatchEngine.Profiles[profName] or {}
+	local span = prof.Span or 16
+	local fallbackAddr = (boxIdx - 1) * span + 1
 	return {
 		Address = fallbackAddr,
-		Span = 16,
-		Type = getSelectedFixtureName(),
+		Span = span,
+		Type = profName,
 		Channels = {
-			X = fallbackAddr,
-			Y = fallbackAddr + 1,
-			Shutter = fallbackAddr + 6,
-			Dimmer = fallbackAddr + 7,
-			Color = fallbackAddr + 8,
-			Gobo = fallbackAddr + 9,
-			Prism = fallbackAddr + 11,
-			Focus = fallbackAddr + 12,
-			Speed = fallbackAddr + 14,
+			X = toAbsChannel(fallbackAddr, prof.X, span),
+			Y = toAbsChannel(fallbackAddr, prof.Y, span),
+			Shutter = toAbsChannel(fallbackAddr, prof.Shutter, span),
+			Dimmer = toAbsChannel(fallbackAddr, prof.Dimmer, span),
 		},
 	}
 end
 
-local function openGateForFixture(fix, forceGate)
-	if not (state.autoOpenGate and fix and fix.Channels) then return end
-	if fix.Channels.Dimmer then
-		transport:SendChannel(fix.Channels.Dimmer, 255, forceGate == true)
+local function getTargetFixtures()
+	local selList = getSelectedBoxList()
+	local list = {}
+	if #selList > 0 then
+		for _, boxIdx in ipairs(selList) do
+			table.insert(list, resolveFixtureForBox(boxIdx))
+		end
+	else
+		local total = state.addedCountByUniv[state.universe] or 0
+		for idx = 1, total do
+			table.insert(list, resolveFixtureForBox(idx))
+		end
 	end
-	if fix.Channels.Shutter then
-		transport:SendChannel(fix.Channels.Shutter, 0, forceGate == true)
-	end
+	return list
 end
 
 local function updateBadge()
@@ -357,48 +370,63 @@ local function updateBadge()
 	local selList = getSelectedBoxList()
 	local addrs = {}
 	for _, boxIdx in ipairs(selList) do
-		local fix = resolveFixtureForBox(boxIdx)
-		table.insert(addrs, tostring(fix.Address))
+		table.insert(addrs, tostring(resolveFixtureForBox(boxIdx).Address))
 	end
 	local tag = (#addrs > 0) and table.concat(addrs, ",") or tostring(state.nextAddress)
 	local conn = transport.DataRemote and "OK" or ".."
 	addrBadge.Text = "U" .. state.universe .. "•A[" .. tag .. "] " .. conn .. " TX:" .. transport.TxCount
 end
 
-local function sendToSelectedRole(roleKey, dmxVal, fallbackOffset1)
-	local clamped = math.clamp(math.floor(dmxVal), 0, 255)
-	local targets = {}
-	local seen = {}
+local function setDevicesPower(isOn)
+	state.devicesPowerOn = (isOn == true)
+	local powerVal = state.devicesPowerOn and 255 or 0
+	local targets = getTargetFixtures()
 
-	for boxIdx, isSel in pairs(state.selectedBoxes) do
-		if isSel then
-			local fix = resolveFixtureForBox(boxIdx)
-			if state.autoOpenGate then
-				openGateForFixture(fix, false)
+	for _, fix in ipairs(targets) do
+		if fix and fix.Channels then
+			local ch = fix.Channels
+			local hasDimmer = type(ch.Dimmer) == "number"
+			local hasShutter = type(ch.Shutter) == "number"
+
+			if hasDimmer then
+				transport:SendChannel(ch.Dimmer, powerVal, true)
 			end
-			local targetCh = (fix.Channels and fix.Channels[roleKey])
-				or toAbsChannel(fix.Address, (fallbackOffset1 or 1) - 1, fix.Span or 16)
-			if targetCh and not seen[targetCh] then
-				seen[targetCh] = true
-				table.insert(targets, targetCh)
+			if hasShutter then
+				transport:SendChannel(ch.Shutter, 0, true)
+			end
+			if not hasDimmer and not hasShutter and fix.Address then
+				transport:SendChannel(fix.Address, powerVal, true)
 			end
 		end
 	end
 
-	for _, targetCh in ipairs(targets) do
-		transport:SendChannel(targetCh, clamped, false)
-	end
 	updateBadge()
 end
 
 local function applyAxisToSelected(dmxVal)
-	local role = (state.axisMode == "Pan") and "X" or "Y"
-	local fallbackOff1 = (state.axisMode == "Pan") and 1 or 2
-	sendToSelectedRole(role, dmxVal, fallbackOff1)
+	local clamped = math.clamp(math.floor(dmxVal), 0, 255)
+	local isPan = (state.axisMode == "Pan")
+	local roleKey = isPan and "X" or "Y"
+	local fallbackOff1 = isPan and 1 or 2
+
+	local seen = {}
+	for boxIdx, isSel in pairs(state.selectedBoxes) do
+		if isSel then
+			local fix = resolveFixtureForBox(boxIdx)
+			local targetCh = (fix.Channels and fix.Channels[roleKey])
+				or toAbsChannel(fix.Address, fallbackOff1 - 1, fix.Span or 16)
+			if targetCh and not seen[targetCh] then
+				seen[targetCh] = true
+				transport:SendChannel(targetCh, clamped, false)
+			end
+		end
+	end
+
+	updateBadge()
 end
 
 local screenGui = Instance.new("ScreenGui")
-screenGui.Name = "DmxConsoleSyncedGui"
+screenGui.Name = "DmxConsoleSnapGui"
 screenGui.ResetOnSpawn = false
 screenGui.IgnoreGuiInset = true
 screenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
@@ -407,17 +435,20 @@ screenGui.Parent = parentTarget
 
 local mainFrame = Instance.new("Frame")
 mainFrame.Name = "MainWindow"
-mainFrame.Size = UDim2.fromOffset(360, 465)
-mainFrame.Position = UDim2.new(0.5, -180, 0.5, -232.5)
-mainFrame.BackgroundColor3 = Color3.fromRGB(58, 58, 60)
+mainFrame.Size = UDim2.fromOffset(WIN_W, WIN_H)
+mainFrame.Position = UDim2.new(0.5, -math.floor(WIN_W / 2), 0.5, -math.floor(WIN_H / 2))
+mainFrame.BackgroundColor3 = THEME.bg
 mainFrame.BorderSizePixel = 0
 mainFrame.Active = true
 mainFrame.Parent = screenGui
-Instance.new("UICorner", mainFrame).CornerRadius = UDim.new(0, 18)
+Instance.new("UICorner", mainFrame).CornerRadius = UDim.new(0, 16)
+local mainStroke = Instance.new("UIStroke", mainFrame)
+mainStroke.Color = THEME.stroke
+mainStroke.Thickness = 1.2
 
 -- Top Bar
 local topBar = Instance.new("Frame")
-topBar.Size = UDim2.new(1, 0, 0, 44)
+topBar.Size = UDim2.new(1, 0, 0, 38)
 topBar.BackgroundTransparency = 1
 topBar.Active = true
 topBar.Parent = mainFrame
@@ -460,213 +491,308 @@ do
 	end)
 end
 
+local reelIndicator = Instance.new("TextLabel")
+reelIndicator.Size = UDim2.fromOffset(120, 24)
+reelIndicator.Position = UDim2.fromOffset(14, 7)
+reelIndicator.BackgroundTransparency = 1
+reelIndicator.Text = "REEL 1/2 • SWIPE ↕"
+reelIndicator.TextXAlignment = Enum.TextXAlignment.Left
+reelIndicator.TextColor3 = THEME.muted
+reelIndicator.TextSize = 11
+reelIndicator.Font = Enum.Font.GothamBold
+reelIndicator.Parent = topBar
+
 local minBtn = Instance.new("TextButton")
-minBtn.Size = UDim2.fromOffset(34, 28)
-minBtn.Position = UDim2.new(1, -86, 0, 8)
+minBtn.Size = UDim2.fromOffset(32, 26)
+minBtn.Position = UDim2.new(1, -80, 0, 6)
 minBtn.BackgroundTransparency = 1
 minBtn.Text = "—"
-minBtn.TextColor3 = Color3.fromRGB(220, 222, 226)
-minBtn.TextSize = 20
+minBtn.TextColor3 = THEME.muted
+minBtn.TextSize = 19
 minBtn.Font = Enum.Font.GothamBold
 minBtn.Parent = topBar
 
 local closeBtn = Instance.new("TextButton")
-closeBtn.Size = UDim2.fromOffset(34, 28)
-closeBtn.Position = UDim2.new(1, -44, 0, 8)
+closeBtn.Size = UDim2.fromOffset(32, 26)
+closeBtn.Position = UDim2.new(1, -42, 0, 6)
 closeBtn.BackgroundTransparency = 1
 closeBtn.Text = "×"
-closeBtn.TextColor3 = Color3.fromRGB(220, 222, 226)
-closeBtn.TextSize = 24
+closeBtn.TextColor3 = THEME.muted
+closeBtn.TextSize = 23
 closeBtn.Font = Enum.Font.Gotham
 closeBtn.Parent = topBar
 
 local topLine = Instance.new("Frame")
 topLine.Size = UDim2.new(1, -24, 0, 1)
-topLine.Position = UDim2.fromOffset(12, 44)
-topLine.BackgroundColor3 = Color3.fromRGB(150, 150, 154)
+topLine.Position = UDim2.fromOffset(12, 38)
+topLine.BackgroundColor3 = THEME.divider
 topLine.BorderSizePixel = 0
 topLine.Parent = mainFrame
 
--- 4 Tab
+-- Reel Viewport (Clipped area untuk snap-swipe ala TikTok/Shorts)
+local reelViewport = Instance.new("Frame")
+reelViewport.Name = "ReelViewport"
+reelViewport.Size = UDim2.new(1, -24, 1, -46)
+reelViewport.Position = UDim2.fromOffset(12, 42)
+reelViewport.BackgroundTransparency = 1
+reelViewport.ClipsDescendants = true
+reelViewport.Active = true
+reelViewport.Parent = mainFrame
+
+local reelTrack = Instance.new("Frame")
+reelTrack.Name = "ReelTrack"
+reelTrack.Size = UDim2.new(1, 0, 2, 0)
+reelTrack.Position = UDim2.fromOffset(0, 0)
+reelTrack.BackgroundTransparency = 1
+reelTrack.Parent = reelViewport
+
+local reelHeight = WIN_H - 46
+
+local function snapToReel(idx)
+	local clampedIdx = math.clamp(idx, 1, 2)
+	state.reelIndex = clampedIdx
+	reelIndicator.Text = "REEL " .. clampedIdx .. "/2 • SWIPE ↕"
+	local targetY = -(clampedIdx - 1) * reelHeight
+	TweenService:Create(
+		reelTrack,
+		TweenInfo.new(0.22, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
+		{ Position = UDim2.fromOffset(0, targetY) }
+	):Play()
+end
+
+-- Gesture snap-swipe vertikal di area kosong viewport
+do
+	local swiping = false
+	local swipeInput = nil
+	local startY = 0
+	local baseTrackY = 0
+
+	reelViewport.InputBegan:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.Touch or input.UserInputType == Enum.UserInputType.MouseButton1 then
+			swiping = true
+			swipeInput = input
+			startY = input.Position.Y
+			baseTrackY = reelTrack.Position.Y.Offset
+		end
+	end)
+
+	reelViewport.InputChanged:Connect(function(input)
+		if swiping and (input == swipeInput or input.UserInputType == Enum.UserInputType.Touch or input.UserInputType.MouseMovement) then
+			local deltaY = input.Position.Y - startY
+			local minY = -reelHeight
+			local maxY = 0
+			local nextY = math.clamp(baseTrackY + deltaY, minY - 24, maxY + 24)
+			reelTrack.Position = UDim2.fromOffset(0, nextY)
+		end
+	end)
+
+	UserInputService.InputEnded:Connect(function(input)
+		if swiping and (input == swipeInput or input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch) then
+			swiping = false
+			local deltaY = input.Position.Y - startY
+			if deltaY < -38 then
+				snapToReel(state.reelIndex + 1)
+			elseif deltaY > 38 then
+				snapToReel(state.reelIndex - 1)
+			else
+				snapToReel(state.reelIndex)
+			end
+		end
+	end)
+end
+
+-- ============================================================================
+-- REEL 1: 4 TAB + GRID + PATCH / PREFERENSI / MAIN / SETTING
+-- ============================================================================
+local reel1 = Instance.new("Frame")
+reel1.Size = UDim2.new(1, 0, 0.5, 0)
+reel1.Position = UDim2.fromOffset(0, 0)
+reel1.BackgroundTransparency = 1
+reel1.Parent = reelTrack
+
 local tabNames = { "patch", "Preferensi", "main", "Setting" }
 local tabButtons = {}
 local tabContainer = Instance.new("Frame")
-tabContainer.Size = UDim2.new(1, -24, 0, 28)
-tabContainer.Position = UDim2.fromOffset(12, 54)
+tabContainer.Size = UDim2.new(1, 0, 0, 26)
+tabContainer.Position = UDim2.fromOffset(0, 2)
 tabContainer.BackgroundTransparency = 1
-tabContainer.Parent = mainFrame
+tabContainer.Parent = reel1
 
 local tabLayout = Instance.new("UIListLayout")
 tabLayout.FillDirection = Enum.FillDirection.Horizontal
 tabLayout.HorizontalAlignment = Enum.HorizontalAlignment.Center
-tabLayout.Padding = UDim.new(0, 8)
+tabLayout.Padding = UDim.new(0, 7)
 tabLayout.Parent = tabContainer
 
 local bodyFrame = Instance.new("Frame")
-bodyFrame.Size = UDim2.new(1, -24, 1, -94)
-bodyFrame.Position = UDim2.fromOffset(12, 90)
+bodyFrame.Size = UDim2.new(1, 0, 1, -32)
+bodyFrame.Position = UDim2.fromOffset(0, 32)
 bodyFrame.BackgroundTransparency = 1
-bodyFrame.Parent = mainFrame
+bodyFrame.Parent = reel1
 
--- Shared Channel Grid
+-- Shared Channel Grid (sinkron 1:1 di patch & Preferensi)
 local sharedChannelHolder = Instance.new("Frame")
-sharedChannelHolder.Size = UDim2.new(1, 0, 0, 124)
-sharedChannelHolder.Position = UDim2.fromOffset(0, 2)
+sharedChannelHolder.Size = UDim2.new(1, 0, 0, 106)
+sharedChannelHolder.Position = UDim2.fromOffset(0, 0)
 sharedChannelHolder.BackgroundTransparency = 1
 sharedChannelHolder.Parent = bodyFrame
 
 local channelFrame = Instance.new("ScrollingFrame")
 channelFrame.Name = "ChannelContainer"
-channelFrame.Size = UDim2.new(1, 0, 0, 96)
+channelFrame.Size = UDim2.new(1, 0, 0, 82)
 channelFrame.Position = UDim2.fromOffset(0, 0)
 channelFrame.BackgroundTransparency = 1
-channelFrame.ScrollBarThickness = 3
+channelFrame.ScrollBarThickness = 2
+channelFrame.ScrollBarImageColor3 = THEME.stroke
 channelFrame.CanvasSize = UDim2.fromOffset(0, 0)
 channelFrame.AutomaticCanvasSize = Enum.AutomaticSize.Y
 channelFrame.Parent = sharedChannelHolder
 
 local channelGrid = Instance.new("UIGridLayout")
-channelGrid.CellSize = UDim2.fromOffset(49, 43)
-channelGrid.CellPadding = UDim2.fromOffset(6.5, 8)
+channelGrid.CellSize = UDim2.fromOffset(48, 36)
+channelGrid.CellPadding = UDim2.fromOffset(6, 6)
 channelGrid.FillDirection = Enum.FillDirection.Horizontal
 channelGrid.SortOrder = Enum.SortOrder.LayoutOrder
 channelGrid.Parent = channelFrame
 
 local pageLabel = Instance.new("TextLabel")
-pageLabel.Size = UDim2.fromOffset(90, 20)
-pageLabel.Position = UDim2.fromOffset(0, 102)
+pageLabel.Size = UDim2.fromOffset(88, 18)
+pageLabel.Position = UDim2.fromOffset(0, 86)
 pageLabel.BackgroundTransparency = 1
 pageLabel.Text = "page 1"
 pageLabel.TextXAlignment = Enum.TextXAlignment.Left
-pageLabel.TextColor3 = Color3.fromRGB(190, 190, 195)
-pageLabel.TextSize = 13
+pageLabel.TextColor3 = THEME.muted
+pageLabel.TextSize = 12
 pageLabel.Font = Enum.Font.Gotham
 pageLabel.Parent = sharedChannelHolder
 
 local nextPageBtn = Instance.new("TextButton")
-nextPageBtn.Size = UDim2.fromOffset(96, 20)
-nextPageBtn.Position = UDim2.new(1, -96, 0, 102)
+nextPageBtn.Size = UDim2.fromOffset(96, 18)
+nextPageBtn.Position = UDim2.new(1, -96, 0, 86)
 nextPageBtn.BackgroundTransparency = 1
 nextPageBtn.Text = "next page >"
 nextPageBtn.TextXAlignment = Enum.TextXAlignment.Right
-nextPageBtn.TextColor3 = Color3.fromRGB(190, 190, 195)
-nextPageBtn.TextSize = 13
+nextPageBtn.TextColor3 = THEME.muted
+nextPageBtn.TextSize = 12
 nextPageBtn.Font = Enum.Font.Gotham
 nextPageBtn.Parent = sharedChannelHolder
 
 -- Tab 1: Patch
 local patchPage = Instance.new("Frame")
-patchPage.Size = UDim2.new(1, 0, 1, -126)
-patchPage.Position = UDim2.fromOffset(0, 126)
+patchPage.Size = UDim2.new(1, 0, 1, -108)
+patchPage.Position = UDim2.fromOffset(0, 108)
 patchPage.BackgroundTransparency = 1
 patchPage.Visible = true
 patchPage.Parent = bodyFrame
 
 local addFixtureBtn = Instance.new("TextButton")
-addFixtureBtn.Size = UDim2.fromOffset(104, 28)
-addFixtureBtn.Position = UDim2.new(1, -104, 0, 20)
-addFixtureBtn.BackgroundColor3 = Color3.fromRGB(33, 134, 235)
+addFixtureBtn.Size = UDim2.fromOffset(102, 25)
+addFixtureBtn.Position = UDim2.new(1, -102, 0, 0)
+addFixtureBtn.BackgroundColor3 = THEME.primary
 addFixtureBtn.Text = "add fixture +"
-addFixtureBtn.TextColor3 = Color3.fromRGB(245, 248, 255)
-addFixtureBtn.TextSize = 13
+addFixtureBtn.TextColor3 = THEME.text
+addFixtureBtn.TextSize = 12
 addFixtureBtn.Font = Enum.Font.GothamMedium
 addFixtureBtn.BorderSizePixel = 0
 addFixtureBtn.Parent = patchPage
-Instance.new("UICorner", addFixtureBtn).CornerRadius = UDim.new(0, 8)
+Instance.new("UICorner", addFixtureBtn).CornerRadius = UDim.new(0, 7)
 
 local fixtureRow = Instance.new("Frame")
-fixtureRow.Size = UDim2.new(1, 0, 0, 32)
-fixtureRow.Position = UDim2.fromOffset(0, 58)
-fixtureRow.BackgroundColor3 = Color3.fromRGB(74, 74, 77)
+fixtureRow.Size = UDim2.new(1, 0, 0, 28)
+fixtureRow.Position = UDim2.fromOffset(0, 29)
+fixtureRow.BackgroundColor3 = THEME.surface
 fixtureRow.BorderSizePixel = 0
 fixtureRow.Parent = patchPage
 Instance.new("UICorner", fixtureRow).CornerRadius = UDim.new(1, 0)
 local fixStroke = Instance.new("UIStroke", fixtureRow)
-fixStroke.Color = Color3.fromRGB(34, 34, 36)
-fixStroke.Thickness = 1.5
+fixStroke.Color = THEME.stroke
+fixStroke.Thickness = 1.2
 
 local prevFixBtn = Instance.new("TextButton")
-prevFixBtn.Size = UDim2.fromOffset(36, 32)
-prevFixBtn.Position = UDim2.fromOffset(6, 0)
+prevFixBtn.Size = UDim2.fromOffset(34, 28)
+prevFixBtn.Position = UDim2.fromOffset(4, 0)
 prevFixBtn.BackgroundTransparency = 1
 prevFixBtn.Text = "◁"
-prevFixBtn.TextColor3 = Color3.fromRGB(28, 28, 30)
-prevFixBtn.TextSize = 16
+prevFixBtn.TextColor3 = THEME.muted
+prevFixBtn.TextSize = 14
 prevFixBtn.Font = Enum.Font.GothamBold
 prevFixBtn.Parent = fixtureRow
 
 local fixtureNameLabel = Instance.new("TextLabel")
-fixtureNameLabel.Size = UDim2.new(1, -92, 1, 0)
-fixtureNameLabel.Position = UDim2.fromOffset(46, 0)
+fixtureNameLabel.Size = UDim2.new(1, -84, 1, 0)
+fixtureNameLabel.Position = UDim2.fromOffset(42, 0)
 fixtureNameLabel.BackgroundTransparency = 1
 fixtureNameLabel.Text = getSelectedFixtureName()
-fixtureNameLabel.TextColor3 = Color3.fromRGB(235, 235, 240)
-fixtureNameLabel.TextSize = 13
+fixtureNameLabel.TextColor3 = THEME.text
+fixtureNameLabel.TextSize = 12
 fixtureNameLabel.Font = Enum.Font.GothamMedium
 fixtureNameLabel.Parent = fixtureRow
 
 local nextFixBtn = Instance.new("TextButton")
-nextFixBtn.Size = UDim2.fromOffset(36, 32)
-nextFixBtn.Position = UDim2.new(1, -42, 0, 0)
+nextFixBtn.Size = UDim2.fromOffset(34, 28)
+nextFixBtn.Position = UDim2.new(1, -38, 0, 0)
 nextFixBtn.BackgroundTransparency = 1
 nextFixBtn.Text = "▷"
-nextFixBtn.TextColor3 = Color3.fromRGB(28, 28, 30)
-nextFixBtn.TextSize = 16
+nextFixBtn.TextColor3 = THEME.muted
+nextFixBtn.TextSize = 14
 nextFixBtn.Font = Enum.Font.GothamBold
 nextFixBtn.Parent = fixtureRow
 
 local function createPill(parent, yPos, isInput, textOrPlaceholder)
 	local box = Instance.new(isInput and "TextBox" or "TextButton")
-	box.Size = UDim2.new(1, 0, 0, 30)
+	box.Size = UDim2.new(1, 0, 0, 27)
 	box.Position = UDim2.fromOffset(0, yPos)
-	box.BackgroundColor3 = Color3.fromRGB(74, 74, 77)
-	box.TextColor3 = Color3.fromRGB(235, 235, 240)
-	box.TextSize = 13
+	box.BackgroundColor3 = THEME.surface
+	box.TextColor3 = THEME.text
+	box.TextSize = 12
 	box.Font = Enum.Font.GothamMedium
 	box.BorderSizePixel = 0
 	box.Parent = parent
 	if isInput then
 		box.Text = ""
 		box.PlaceholderText = textOrPlaceholder
-		box.PlaceholderColor3 = Color3.fromRGB(170, 170, 176)
+		box.PlaceholderColor3 = THEME.muted
 		box.ClearTextOnFocus = false
 	else
 		box.Text = textOrPlaceholder
 	end
 	Instance.new("UICorner", box).CornerRadius = UDim.new(1, 0)
 	local stroke = Instance.new("UIStroke", box)
-	stroke.Color = Color3.fromRGB(34, 34, 36)
-	stroke.Thickness = 1.5
+	stroke.Color = THEME.stroke
+	stroke.Thickness = 1.2
 	return box
 end
 
-local countBox = createPill(patchPage, 96, true, "count fixture your add")
-local universeBtn = createPill(patchPage, 132, false, "Universe 1")
-local autoCalcBtn = createPill(patchPage, 168, false, "Auto calculate")
+local countBox = createPill(patchPage, 61, true, "count fixture your add")
+local universeBtn = createPill(patchPage, 92, false, "Universe 1")
+local autoCalcBtn = createPill(patchPage, 123, false, "Auto calculate")
 
 addrBadge = Instance.new("TextLabel")
-addrBadge.Size = UDim2.fromOffset(164, 24)
-addrBadge.Position = UDim2.new(1, -164, 1, -24)
-addrBadge.BackgroundColor3 = Color3.fromRGB(168, 168, 172)
+addrBadge.Size = UDim2.fromOffset(162, 20)
+addrBadge.Position = UDim2.new(1, -162, 1, -20)
+addrBadge.BackgroundColor3 = THEME.badgeBg
 addrBadge.Text = "U1•A[1] .. TX:0"
-addrBadge.TextColor3 = Color3.fromRGB(30, 30, 32)
-addrBadge.TextSize = 11
+addrBadge.TextColor3 = THEME.text
+addrBadge.TextSize = 10
 addrBadge.Font = Enum.Font.GothamBold
 addrBadge.BorderSizePixel = 0
 addrBadge.Parent = patchPage
 Instance.new("UICorner", addrBadge).CornerRadius = UDim.new(0, 6)
+local badgeStroke = Instance.new("UIStroke", addrBadge)
+badgeStroke.Color = THEME.stroke
+badgeStroke.Thickness = 1
 
--- Tab 2: Preferensi
+-- Tab 2: Preferensi (Pan, Tilt, number°, dan fader saja)
 local prefPage = Instance.new("Frame")
-prefPage.Size = UDim2.new(1, 0, 1, -126)
-prefPage.Position = UDim2.fromOffset(0, 126)
+prefPage.Size = UDim2.new(1, 0, 1, -108)
+prefPage.Position = UDim2.fromOffset(0, 108)
 prefPage.BackgroundTransparency = 1
 prefPage.Visible = false
 prefPage.Parent = bodyFrame
 
 local panBtn = Instance.new("TextButton")
-panBtn.Size = UDim2.fromOffset(108, 26)
-panBtn.Position = UDim2.fromOffset(0, 4)
+panBtn.Size = UDim2.fromOffset(104, 26)
+panBtn.Position = UDim2.fromOffset(0, 8)
 panBtn.Text = "Pan"
 panBtn.TextSize = 13
 panBtn.Font = Enum.Font.GothamMedium
@@ -675,8 +801,8 @@ panBtn.Parent = prefPage
 Instance.new("UICorner", panBtn).CornerRadius = UDim.new(0, 6)
 
 local tiltBtn = Instance.new("TextButton")
-tiltBtn.Size = UDim2.fromOffset(108, 26)
-tiltBtn.Position = UDim2.fromOffset(116, 4)
+tiltBtn.Size = UDim2.fromOffset(104, 26)
+tiltBtn.Position = UDim2.fromOffset(112, 8)
 tiltBtn.Text = "Tilt"
 tiltBtn.TextSize = 13
 tiltBtn.Font = Enum.Font.GothamMedium
@@ -685,20 +811,23 @@ tiltBtn.Parent = prefPage
 Instance.new("UICorner", tiltBtn).CornerRadius = UDim.new(0, 6)
 
 local numberDegLabel = Instance.new("TextLabel")
-numberDegLabel.Size = UDim2.fromOffset(96, 26)
-numberDegLabel.Position = UDim2.new(1, -96, 0, 4)
-numberDegLabel.BackgroundColor3 = Color3.fromRGB(115, 116, 120)
+numberDegLabel.Size = UDim2.fromOffset(92, 26)
+numberDegLabel.Position = UDim2.new(1, -92, 0, 8)
+numberDegLabel.BackgroundColor3 = THEME.surfaceAlt
 numberDegLabel.Text = "0°"
-numberDegLabel.TextColor3 = Color3.fromRGB(32, 32, 34)
+numberDegLabel.TextColor3 = THEME.text
 numberDegLabel.TextSize = 12
 numberDegLabel.Font = Enum.Font.GothamBold
 numberDegLabel.BorderSizePixel = 0
 numberDegLabel.Parent = prefPage
 Instance.new("UICorner", numberDegLabel).CornerRadius = UDim.new(0, 4)
+local degStroke = Instance.new("UIStroke", numberDegLabel)
+degStroke.Color = THEME.stroke
+degStroke.Thickness = 1
 
 local faderHitArea = Instance.new("TextButton")
-faderHitArea.Size = UDim2.new(1, 0, 0, 28)
-faderHitArea.Position = UDim2.fromOffset(0, 31)
+faderHitArea.Size = UDim2.new(1, 0, 0, 32)
+faderHitArea.Position = UDim2.fromOffset(0, 46)
 faderHitArea.BackgroundTransparency = 1
 faderHitArea.Text = ""
 faderHitArea.AutoButtonColor = false
@@ -706,8 +835,8 @@ faderHitArea.Parent = prefPage
 
 local faderTrack = Instance.new("Frame")
 faderTrack.Size = UDim2.new(1, 0, 0, 6)
-faderTrack.Position = UDim2.fromOffset(0, 11)
-faderTrack.BackgroundColor3 = Color3.fromRGB(130, 131, 135)
+faderTrack.Position = UDim2.fromOffset(0, 13)
+faderTrack.BackgroundColor3 = THEME.track
 faderTrack.BorderSizePixel = 0
 faderTrack.Parent = faderHitArea
 Instance.new("UICorner", faderTrack).CornerRadius = UDim.new(1, 0)
@@ -715,7 +844,7 @@ Instance.new("UICorner", faderTrack).CornerRadius = UDim.new(1, 0)
 local faderThumb = Instance.new("TextButton")
 faderThumb.Size = UDim2.fromOffset(36, 22)
 faderThumb.Position = UDim2.fromOffset(0, -8)
-faderThumb.BackgroundColor3 = Color3.fromRGB(11, 136, 153)
+faderThumb.BackgroundColor3 = THEME.accent
 faderThumb.Text = ""
 faderThumb.BorderSizePixel = 0
 faderThumb.Parent = faderTrack
@@ -767,100 +896,88 @@ do
 	end)
 end
 
-local function createMiniBtn(parent, xPos, yPos, width, text)
-	local btn = Instance.new("TextButton")
-	btn.Size = UDim2.fromOffset(width, 26)
-	btn.Position = UDim2.fromOffset(xPos, yPos)
-	btn.BackgroundColor3 = Color3.fromRGB(74, 74, 77)
-	btn.TextColor3 = Color3.fromRGB(235, 235, 240)
-	btn.Text = text
-	btn.TextSize = 11
-	btn.Font = Enum.Font.GothamMedium
-	btn.BorderSizePixel = 0
-	btn.Parent = parent
-	Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 6)
-	return btn
-end
-
-local colorBtn = createMiniBtn(prefPage, 0, 62, 108, "Color #1 (CH9)")
-local goboBtn = createMiniBtn(prefPage, 114, 62, 108, "Gobo Off (CH10)")
-local prismBtn = createMiniBtn(prefPage, 228, 62, 108, "Prism 1x (CH12)")
-
-local focusBtn = createMiniBtn(prefPage, 0, 94, 165, "Focus: 0 (CH13)")
-local rotBtn = createMiniBtn(prefPage, 171, 94, 165, "Rot/Spd: 0 (CH15)")
-
-local autoGateBtn = createPill(prefPage, 128, false, "Auto Gate (Dim255+Strobe0): ON")
-autoGateBtn.MouseButton1Click:Connect(function()
-	state.autoOpenGate = not state.autoOpenGate
-	autoGateBtn.Text = "Auto Gate (Dim255+Strobe0): " .. (state.autoOpenGate and "ON" or "OFF")
-	if state.autoOpenGate then
-		for boxIdx, isSel in pairs(state.selectedBoxes) do
-			if isSel then
-				openGateForFixture(resolveFixtureForBox(boxIdx), true)
-			end
-		end
-		updateBadge()
-	end
-end)
-
-local prismModes = {
-	{ label = "Single", val = 0 },
-	{ label = "Flat", val = 25 },
-	{ label = "Ring1", val = 80 },
-	{ label = "Ring2", val = 180 },
-}
-
-colorBtn.MouseButton1Click:Connect(function()
-	state.colorStep = (state.colorStep % 8) + 1
-	local dmxVal = math.floor(((state.colorStep - 1) / 8) * 255)
-	colorBtn.Text = "Color #" .. state.colorStep .. " (CH9)"
-	sendToSelectedRole("Color", dmxVal, 9)
-end)
-
-goboBtn.MouseButton1Click:Connect(function()
-	state.goboStep = (state.goboStep + 1) % 5
-	local dmxVal = (state.goboStep == 0) and 0 or math.floor(((state.goboStep - 1) / 4) * 255)
-	goboBtn.Text = (state.goboStep == 0) and "Gobo Off (CH10)" or ("Gobo #" .. state.goboStep .. " (CH10)")
-	sendToSelectedRole("Gobo", dmxVal, 10)
-end)
-
-prismBtn.MouseButton1Click:Connect(function()
-	state.prismStep = (state.prismStep % #prismModes) + 1
-	local mode = prismModes[state.prismStep]
-	prismBtn.Text = "Prism " .. mode.label .. " (CH12)"
-	sendToSelectedRole("Prism", mode.val, 12)
-end)
-
-focusBtn.MouseButton1Click:Connect(function()
-	state.focusVal = (state.focusVal + 64) % 256
-	focusBtn.Text = "Focus: " .. state.focusVal .. " (CH13)"
-	sendToSelectedRole("Focus", state.focusVal, 13)
-end)
-
-rotBtn.MouseButton1Click:Connect(function()
-	state.rotVal = (state.rotVal + 64) % 256
-	rotBtn.Text = "Rot/Spd: " .. state.rotVal .. " (CH15)"
-	sendToSelectedRole("Speed", state.rotVal, 15)
-end)
-
--- Tab 3 & 4
+-- Tab 3: main
 local mainPage = Instance.new("TextLabel")
 mainPage.Size = UDim2.fromScale(1, 1)
 mainPage.BackgroundTransparency = 1
-mainPage.TextColor3 = Color3.fromRGB(220, 222, 228)
+mainPage.TextColor3 = THEME.text
 mainPage.TextSize = 13
 mainPage.Font = Enum.Font.GothamMedium
 mainPage.TextWrapped = true
 mainPage.Visible = false
 mainPage.Parent = bodyFrame
 
+-- Tab 4: Setting
 local settingPage = Instance.new("Frame")
 settingPage.Size = UDim2.fromScale(1, 1)
 settingPage.BackgroundTransparency = 1
 settingPage.Visible = false
 settingPage.Parent = bodyFrame
 
-local clearAllBtn = createPill(settingPage, 8, false, "Reset / Clear Patch")
+local devicesPowerBtn = createPill(settingPage, 8, false, "Devices Power: OFF")
+local clearAllBtn = createPill(settingPage, 46, false, "Reset / Clear Patch")
+
+-- ============================================================================
+-- REEL 2: SNAP-SWIPE KE BAWAH (DEVICES POWER, RESET, & STATUS RINGKAS)
+-- ============================================================================
+local reel2 = Instance.new("Frame")
+reel2.Size = UDim2.new(1, 0, 0.5, 0)
+reel2.Position = UDim2.fromOffset(0, reelHeight)
+reel2.BackgroundTransparency = 1
+reel2.Parent = reelTrack
+
+local reel2Title = Instance.new("TextLabel")
+reel2Title.Size = UDim2.new(1, 0, 0, 22)
+reel2Title.Position = UDim2.fromOffset(0, 4)
+reel2Title.BackgroundTransparency = 1
+reel2Title.Text = "QUICK DEVICES & SYSTEM"
+reel2Title.TextXAlignment = Enum.TextXAlignment.Left
+reel2Title.TextColor3 = THEME.muted
+reel2Title.TextSize = 12
+reel2Title.Font = Enum.Font.GothamBold
+reel2Title.Parent = reel2
+
+local reel2PowerBtn = createPill(reel2, 34, false, "Devices Power: OFF")
+local reel2ClearBtn = createPill(reel2, 70, false, "Reset / Clear Patch")
+
+local reel2StatusCard = Instance.new("TextLabel")
+reel2StatusCard.Size = UDim2.new(1, 0, 0, 118)
+reel2StatusCard.Position = UDim2.fromOffset(0, 108)
+reel2StatusCard.BackgroundColor3 = THEME.surface
+reel2StatusCard.TextColor3 = THEME.text
+reel2StatusCard.TextSize = 12
+reel2StatusCard.Font = Enum.Font.GothamMedium
+reel2StatusCard.TextXAlignment = Enum.TextXAlignment.Left
+reel2StatusCard.TextYAlignment = Enum.TextYAlignment.Top
+reel2StatusCard.TextWrapped = true
+reel2StatusCard.BorderSizePixel = 0
+reel2StatusCard.Parent = reel2
+Instance.new("UICorner", reel2StatusCard).CornerRadius = UDim.new(0, 10)
+local cardStroke = Instance.new("UIStroke", reel2StatusCard)
+cardStroke.Color = THEME.stroke
+cardStroke.Thickness = 1.2
+
+local backToReel1Btn = createPill(reel2, 236, false, "↑ Swipe / Tap Back to Reel 1")
+
+local function syncPowerButtonStyle()
+	local txt = "Devices Power: " .. (state.devicesPowerOn and "ON" or "OFF")
+	local col = state.devicesPowerOn and THEME.accent or THEME.surface
+	devicesPowerBtn.Text = txt
+	devicesPowerBtn.BackgroundColor3 = col
+	reel2PowerBtn.Text = txt
+	reel2PowerBtn.BackgroundColor3 = col
+end
+
+local function toggleDevicesPower()
+	setDevicesPower(not state.devicesPowerOn)
+	syncPowerButtonStyle()
+end
+
+devicesPowerBtn.MouseButton1Click:Connect(toggleDevicesPower)
+reel2PowerBtn.MouseButton1Click:Connect(toggleDevicesPower)
+backToReel1Btn.MouseButton1Click:Connect(function()
+	snapToReel(1)
+end)
 
 local function getOwnDmxFolder()
 	local carModel = getOwnCarModel(player)
@@ -869,16 +986,17 @@ local function getOwnDmxFolder()
 	return (folder and folder:FindFirstChild("DmxLights")) or carModel:FindFirstChild("DmxLights", true)
 end
 
-function refreshUI()
+local function refreshUI()
 	fixtureNameLabel.Text = getSelectedFixtureName()
 	universeBtn.Text = "Universe " .. state.universe
 	pageLabel.Text = "page " .. state.page
+	syncPowerButtonStyle()
 
-	panBtn.BackgroundColor3 = (state.axisMode == "Pan") and Color3.fromRGB(11, 136, 153) or Color3.fromRGB(115, 116, 120)
-	panBtn.TextColor3 = (state.axisMode == "Pan") and Color3.fromRGB(240, 250, 252) or Color3.fromRGB(32, 32, 34)
+	panBtn.BackgroundColor3 = (state.axisMode == "Pan") and THEME.accent or THEME.surfaceAlt
+	panBtn.TextColor3 = (state.axisMode == "Pan") and THEME.text or THEME.muted
 
-	tiltBtn.BackgroundColor3 = (state.axisMode == "Tilt") and Color3.fromRGB(11, 136, 153) or Color3.fromRGB(115, 116, 120)
-	tiltBtn.TextColor3 = (state.axisMode == "Tilt") and Color3.fromRGB(240, 250, 252) or Color3.fromRGB(32, 32, 34)
+	tiltBtn.BackgroundColor3 = (state.axisMode == "Tilt") and THEME.accent or THEME.surfaceAlt
+	tiltBtn.TextColor3 = (state.axisMode == "Tilt") and THEME.text or THEME.muted
 
 	for _, child in ipairs(channelFrame:GetChildren()) do
 		if child:IsA("TextButton") then
@@ -893,29 +1011,25 @@ function refreshUI()
 
 		for idx = startIdx, endIdx do
 			local isSelected = state.selectedBoxes[idx] == true
-			local fix = resolveFixtureForBox(idx)
 			local card = Instance.new("TextButton")
 			card.Name = "Box_" .. idx
 			card.LayoutOrder = idx - startIdx + 1
-			card.BackgroundColor3 = isSelected and Color3.fromRGB(11, 136, 153) or Color3.fromRGB(72, 72, 75)
+			card.BackgroundColor3 = isSelected and THEME.accent or THEME.surface
 			card.Text = tostring(idx)
-			card.TextColor3 = isSelected and Color3.fromRGB(240, 250, 252) or Color3.fromRGB(240, 245, 255)
-			card.TextSize = 14
+			card.TextColor3 = isSelected and THEME.text or THEME.muted
+			card.TextSize = 13
 			card.Font = Enum.Font.GothamBold
 			card.BorderSizePixel = 0
 			card.Parent = channelFrame
 
-			Instance.new("UICorner", card).CornerRadius = UDim.new(0, 8)
+			Instance.new("UICorner", card).CornerRadius = UDim.new(0, 7)
 			local stroke = Instance.new("UIStroke", card)
-			stroke.Color = Color3.fromRGB(32, 32, 34)
-			stroke.Thickness = 1.5
+			stroke.Color = isSelected and THEME.accent or THEME.stroke
+			stroke.Thickness = 1.2
 
+			-- Klik kotak hanya select/deselect; tidak langsung menyalakan device
 			card.MouseButton1Click:Connect(function()
-				local nextSel = not state.selectedBoxes[idx]
-				state.selectedBoxes[idx] = nextSel
-				if nextSel then
-					openGateForFixture(fix, true)
-				end
+				state.selectedBoxes[idx] = not state.selectedBoxes[idx]
 				refreshUI()
 			end)
 		end
@@ -927,14 +1041,18 @@ function refreshUI()
 	for _, boxIdx in ipairs(selList) do
 		table.insert(addrs, tostring(resolveFixtureForBox(boxIdx).Address))
 	end
-	mainPage.Text = "Selected Box: " .. ((#selList > 0) and table.concat(selList, ", ") or "None")
+	local statusStr = "Selected Box: " .. ((#selList > 0) and table.concat(selList, ", ") or "None")
 		.. "\nStart Addr: " .. ((#addrs > 0) and table.concat(addrs, ", ") or "None")
+		.. "\nDevices Power: " .. (state.devicesPowerOn and "ON" or "OFF")
 		.. "\nRemote: " .. (transport.DataRemote and transport.DataRemote:GetFullName() or "Waiting " .. REMOTE_NAME .. "...")
+
+	mainPage.Text = statusStr
+	reel2StatusCard.Text = "  " .. string.gsub(statusStr, "\n", "\n  ")
 end
 
 for _, tName in ipairs(tabNames) do
 	local btn = Instance.new("TextButton")
-	btn.Size = UDim2.fromOffset(77, 26)
+	btn.Size = UDim2.fromOffset(76, 26)
 	btn.Text = tName
 	btn.TextSize = 12
 	btn.Font = Enum.Font.GothamMedium
@@ -947,8 +1065,8 @@ for _, tName in ipairs(tabNames) do
 		state.activeTab = tName
 		for name, b in pairs(tabButtons) do
 			local active = (name == tName)
-			b.BackgroundColor3 = active and Color3.fromRGB(11, 136, 153) or Color3.fromRGB(115, 116, 119)
-			b.TextColor3 = active and Color3.fromRGB(240, 250, 252) or Color3.fromRGB(32, 32, 34)
+			b.BackgroundColor3 = active and THEME.accent or THEME.surfaceAlt
+			b.TextColor3 = active and THEME.text or THEME.muted
 		end
 		sharedChannelHolder.Visible = (tName == "patch" or tName == "Preferensi")
 		patchPage.Visible = (tName == "patch")
@@ -960,8 +1078,8 @@ end
 
 for name, b in pairs(tabButtons) do
 	local active = (name == state.activeTab)
-	b.BackgroundColor3 = active and Color3.fromRGB(11, 136, 153) or Color3.fromRGB(115, 116, 119)
-	b.TextColor3 = active and Color3.fromRGB(240, 250, 252) or Color3.fromRGB(32, 32, 34)
+	b.BackgroundColor3 = active and THEME.accent or THEME.surfaceAlt
+	b.TextColor3 = active and THEME.text or THEME.muted
 end
 
 prevFixBtn.MouseButton1Click:Connect(function()
@@ -1036,21 +1154,25 @@ tiltBtn.MouseButton1Click:Connect(function()
 	refreshUI()
 end)
 
-clearAllBtn.MouseButton1Click:Connect(function()
+local function resetPatchState()
 	state.rawByUniv[state.universe] = {}
 	state.patchedByUniv[state.universe] = {}
 	state.addedCountByUniv[state.universe] = 0
 	state.selectedBoxes = {}
+	state.devicesPowerOn = false
 	state.nextAddress = 1
 	state.page = 1
 	refreshUI()
-end)
+end
+
+clearAllBtn.MouseButton1Click:Connect(resetPatchState)
+reel2ClearBtn.MouseButton1Click:Connect(resetPatchState)
 
 minBtn.MouseButton1Click:Connect(function()
-	local collapsed = mainFrame.Size.Y.Offset <= 52
-	mainFrame.Size = collapsed and UDim2.fromOffset(360, 465) or UDim2.fromOffset(360, 48)
-	tabContainer.Visible = collapsed
-	bodyFrame.Visible = collapsed
+	local collapsed = mainFrame.Size.Y.Offset <= 46
+	mainFrame.Size = collapsed and UDim2.fromOffset(WIN_W, WIN_H) or UDim2.fromOffset(WIN_W, 42)
+	reelViewport.Visible = collapsed
+	reelIndicator.Visible = collapsed
 end)
 
 closeBtn.MouseButton1Click:Connect(function()
