@@ -1,6 +1,7 @@
 -- DmxConsoleUI_SnapSwipe.lua
 -- Ukuran tetap normal (350x340) + Snap Swipe atas/bawah ala TikTok/Shorts
 -- Tema gelap + Preferensi (Pan/Tilt + number° + fader) + No Auto-Gate on Select + Devices Power di Setting
+-- Mendukung Universe 1 (3-byte buffer) & Universe 2 ({ [2] = buf512 }) sesuai Setup
 
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -12,6 +13,7 @@ local player = Players.LocalPlayer or Players.PlayerAdded:Wait()
 local MAX_CHANNELS = 512
 local DEFAULT_MAX_UNIVERSES = 2
 local REMOTE_NAME = "UDP_DMXDATA"
+local SEND_THROTTLE = 0.04
 
 -- ============================================================================
 -- PATCH ENGINE
@@ -92,74 +94,71 @@ local function toAbsChannel(address, offset0, maxChannels)
 	return (ch >= 1 and ch <= MAX_CHANNELS) and ch or nil
 end
 
-if type(PatchEngine.AutoAddress) ~= "function" then
-	function PatchEngine.AutoAddress(fixtures, maxUniverses)
-		local limitUniv = maxUniverses or DEFAULT_MAX_UNIVERSES
-		local cursors = {}
-		for u = 1, limitUniv do cursors[u] = 1 end
-		local overflow = {}
-		for _, fix in ipairs(fixtures or {}) do
-			local univ = math.clamp(math.floor(fix.Universe or 1), 1, limitUniv)
-			fix.Universe = univ
-			local prof = PatchEngine.Profiles[fix.Type]
-			local span = (prof and prof.Span) or 8
-			fix.Span = span
-			if cursors[univ] + span - 1 <= MAX_CHANNELS then
-				fix.Address = cursors[univ]
-				cursors[univ] = fix.Address + span
-				fix.Overflow = false
-			else
-				fix.Overflow = true
-				table.insert(overflow, fix)
-			end
+local function autoAddressByUniv(fixtures, maxUniverses)
+	local limitUniv = maxUniverses or DEFAULT_MAX_UNIVERSES
+	local cursors = {}
+	for u = 1, limitUniv do cursors[u] = 1 end
+	local overflow = {}
+	for _, fix in ipairs(fixtures or {}) do
+		local univ = math.clamp(math.floor(tonumber(fix.Universe) or 1), 1, limitUniv)
+		fix.Universe = univ
+		local prof = PatchEngine.Profiles[fix.Type]
+		local span = (prof and prof.Span) or 8
+		fix.Span = span
+		if cursors[univ] + span - 1 <= MAX_CHANNELS then
+			fix.Address = cursors[univ]
+			cursors[univ] = fix.Address + span
+			fix.Overflow = false
+		else
+			fix.Overflow = true
+			table.insert(overflow, fix)
 		end
-		return fixtures, overflow
 	end
+	return fixtures, overflow
 end
 
-if type(PatchEngine.PatchAll) ~= "function" then
-	function PatchEngine.PatchAll(fixtures, universeFilter, autoAddress, maxUniverses)
-		local overflow = {}
-		if autoAddress then
-			_, overflow = PatchEngine.AutoAddress(fixtures, maxUniverses or DEFAULT_MAX_UNIVERSES)
-		end
-		local patched = {}
-		for _, fix in ipairs(fixtures or {}) do
-			if not fix.Overflow and (not universeFilter or (fix.Universe or 1) == universeFilter) then
-				local prof = PatchEngine.Profiles[fix.Type] or {}
-				local span = prof.Span or 8
-				local addr = fix.Address or 1
-				table.insert(patched, {
-					Address = addr,
-					EndAddress = math.min(MAX_CHANNELS, addr + span - 1),
-					Span = span,
-					Universe = fix.Universe or 1,
-					Type = fix.Type,
-					Channels = {
-						X = toAbsChannel(addr, prof.X, span),
-						Y = toAbsChannel(addr, prof.Y, span),
-						PanFine = toAbsChannel(addr, prof.PanFine, span),
-						TiltFine = toAbsChannel(addr, prof.TiltFine, span),
-						Shutter = toAbsChannel(addr, prof.Shutter, span),
-						Dimmer = toAbsChannel(addr, prof.Dimmer or 0, span),
-						Color = toAbsChannel(addr, prof.Color, span),
-						Gobo = toAbsChannel(addr, prof.Gobo, span),
-						Prism = toAbsChannel(addr, prof.Prism or prof.Effect, span),
-						Focus = toAbsChannel(addr, prof.Focus, span),
-						Speed = toAbsChannel(addr, prof.Speed or prof.GoboRotation, span),
-						Red = toAbsChannel(addr, prof.Red, span),
-						Green = toAbsChannel(addr, prof.Green, span),
-						Blue = toAbsChannel(addr, prof.Blue, span),
-					},
-				})
-			end
-		end
-		return patched, overflow
+function PatchEngine.PatchAll(fixtures, universeFilter, autoAddress, maxUniverses)
+	local overflow = {}
+	if autoAddress then
+		_, overflow = autoAddressByUniv(fixtures, maxUniverses or DEFAULT_MAX_UNIVERSES)
 	end
+	local patched = {}
+	for _, fix in ipairs(fixtures or {}) do
+		local fixUniv = fix.Universe or 1
+		if not fix.Overflow and (not universeFilter or fixUniv == universeFilter) then
+			local prof = PatchEngine.Profiles[fix.Type] or {}
+			local span = prof.Span or 8
+			local addr = fix.Address or 1
+			table.insert(patched, {
+				Address = addr,
+				EndAddress = math.min(MAX_CHANNELS, addr + span - 1),
+				Span = span,
+				Universe = fixUniv,
+				Type = fix.Type,
+				Channels = {
+					X = toAbsChannel(addr, prof.X, span),
+					Y = toAbsChannel(addr, prof.Y, span),
+					PanFine = toAbsChannel(addr, prof.PanFine, span),
+					TiltFine = toAbsChannel(addr, prof.TiltFine, span),
+					Shutter = toAbsChannel(addr, prof.Shutter, span),
+					Dimmer = toAbsChannel(addr, prof.Dimmer or 0, span),
+					Color = toAbsChannel(addr, prof.Color, span),
+					Gobo = toAbsChannel(addr, prof.Gobo, span),
+					Prism = toAbsChannel(addr, prof.Prism or prof.Effect, span),
+					Focus = toAbsChannel(addr, prof.Focus, span),
+					Speed = toAbsChannel(addr, prof.Speed or prof.GoboRotation, span),
+					Red = toAbsChannel(addr, prof.Red, span),
+					Green = toAbsChannel(addr, prof.Green, span),
+					Blue = toAbsChannel(addr, prof.Blue, span),
+				},
+			})
+		end
+	end
+	return patched, overflow
 end
 
 -- ============================================================================
--- TRANSPORT BUFFER 3-BYTE -> UDP_DMXDATA
+-- TRANSPORT: U1 (3-BYTE BUFFER) & U2 ({ [2] = buf512 }) -> UDP_DMXDATA
 -- ============================================================================
 local function getOwnCarModel(plr)
 	local vehicles = Workspace:FindFirstChild("Vehicles")
@@ -201,7 +200,11 @@ function DmxTransport.new(plr)
 	local self = setmetatable({}, DmxTransport)
 	self.Player = plr
 	self.DataRemote = findUdpDmxRemote(plr)
-	self.LastValues = {}
+	self.LastValues = { [1] = {}, [2] = {} }
+	self.UniverseBuffers = {
+		[2] = buffer.create(MAX_CHANNELS),
+	}
+	self.LastSendTick = {}
 	self.TxCount = 0
 	self:_bind()
 	return self
@@ -231,23 +234,70 @@ function DmxTransport:_bind()
 	end)
 end
 
-function DmxTransport:SendChannel(ch, dmxVal, force)
+function DmxTransport:SendChannel(univ, ch, dmxVal, force)
+	local u = (tonumber(univ) == 2) and 2 or 1
 	local channel = math.clamp(math.floor(tonumber(ch) or 1), 1, MAX_CHANNELS)
 	local val = math.clamp(math.floor(tonumber(dmxVal) or 0), 0, 255)
-	if not force and self.LastValues[channel] == val then
+
+	self.LastValues[u] = self.LastValues[u] or {}
+	if not force and self.LastValues[u][channel] == val then
 		return true
 	end
+
+	local key = u .. ":" .. channel
+	local now = os.clock()
+	if not force and self.LastSendTick[key] and (now - self.LastSendTick[key]) < SEND_THROTTLE then
+		return true
+	end
+
 	local remote = self.DataRemote or self:_refreshRemote()
 	if not remote then
 		return false
 	end
-	self.LastValues[channel] = val
-	local buf = buffer.create(3)
-	buffer.writeu16(buf, 0, channel)
-	buffer.writeu8(buf, 2, val)
-	remote:FireServer(buf)
-	self.TxCount += 1
-	return true
+
+	self.LastValues[u][channel] = val
+	self.LastSendTick[key] = now
+
+	local ok = false
+	if u == 2 then
+		local buf512 = self.UniverseBuffers[2]
+		if not buf512 then
+			buf512 = buffer.create(MAX_CHANNELS)
+			self.UniverseBuffers[2] = buf512
+		end
+		buffer.writeu8(buf512, channel - 1, val)
+		ok = pcall(function()
+			remote:FireServer({ [2] = buf512 })
+		end)
+	else
+		local buf3 = buffer.create(3)
+		buffer.writeu16(buf3, 0, channel)
+		buffer.writeu8(buf3, 2, val)
+		ok = pcall(function()
+			remote:FireServer(buf3)
+		end)
+	end
+
+	if ok then
+		self.TxCount += 1
+	end
+	return ok
+end
+
+function DmxTransport:ClearUniverse(univ)
+	local u = (tonumber(univ) == 2) and 2 or 1
+	self.LastValues[u] = {}
+	if u == 2 then
+		local buf512 = buffer.create(MAX_CHANNELS)
+		self.UniverseBuffers[2] = buf512
+		local remote = self.DataRemote or self:_refreshRemote()
+		if remote then
+			pcall(function()
+				remote:FireServer({ [2] = buf512 })
+			end)
+			self.TxCount += 1
+		end
+	end
 end
 
 local transport = DmxTransport.new(player)
@@ -335,10 +385,11 @@ local function resolveFixtureForBox(boxIdx)
 	local profName = getSelectedFixtureName()
 	local prof = PatchEngine.Profiles[profName] or {}
 	local span = prof.Span or 16
-	local fallbackAddr = (boxIdx - 1) * span + 1
+	local fallbackAddr = math.clamp((boxIdx - 1) * span + 1, 1, MAX_CHANNELS)
 	return {
 		Address = fallbackAddr,
 		Span = span,
+		Universe = state.universe,
 		Type = profName,
 		Channels = {
 			X = toAbsChannel(fallbackAddr, prof.X, span),
@@ -381,6 +432,7 @@ local function setDevicesPower(isOn)
 	state.devicesPowerOn = (isOn == true)
 	local powerVal = state.devicesPowerOn and 255 or 0
 	local targets = getTargetFixtures()
+	local u = state.universe
 
 	for _, fix in ipairs(targets) do
 		if fix and fix.Channels then
@@ -389,13 +441,13 @@ local function setDevicesPower(isOn)
 			local hasShutter = type(ch.Shutter) == "number"
 
 			if hasDimmer then
-				transport:SendChannel(ch.Dimmer, powerVal, true)
+				transport:SendChannel(u, ch.Dimmer, powerVal, true)
 			end
 			if hasShutter then
-				transport:SendChannel(ch.Shutter, 0, true)
+				transport:SendChannel(u, ch.Shutter, 0, true)
 			end
 			if not hasDimmer and not hasShutter and fix.Address then
-				transport:SendChannel(fix.Address, powerVal, true)
+				transport:SendChannel(u, fix.Address, powerVal, true)
 			end
 		end
 	end
@@ -408,6 +460,7 @@ local function applyAxisToSelected(dmxVal)
 	local isPan = (state.axisMode == "Pan")
 	local roleKey = isPan and "X" or "Y"
 	local fallbackOff1 = isPan and 1 or 2
+	local u = state.universe
 
 	local seen = {}
 	for boxIdx, isSel in pairs(state.selectedBoxes) do
@@ -417,7 +470,7 @@ local function applyAxisToSelected(dmxVal)
 				or toAbsChannel(fix.Address, fallbackOff1 - 1, fix.Span or 16)
 			if targetCh and not seen[targetCh] then
 				seen[targetCh] = true
-				transport:SendChannel(targetCh, clamped, false)
+				transport:SendChannel(u, targetCh, clamped, false)
 			end
 		end
 	end
@@ -492,7 +545,7 @@ do
 end
 
 local reelIndicator = Instance.new("TextLabel")
-reelIndicator.Size = UDim2.fromOffset(120, 24)
+reelIndicator.Size = UDim2.fromOffset(140, 24)
 reelIndicator.Position = UDim2.fromOffset(14, 7)
 reelIndicator.BackgroundTransparency = 1
 reelIndicator.Text = "REEL 1/2 • SWIPE ↕"
@@ -560,7 +613,7 @@ local function snapToReel(idx)
 	):Play()
 end
 
--- Gesture snap-swipe vertikal di area kosong viewport
+-- Gesture snap-swipe vertikal
 do
 	local swiping = false
 	local swipeInput = nil
@@ -577,7 +630,7 @@ do
 	end)
 
 	reelViewport.InputChanged:Connect(function(input)
-		if swiping and (input == swipeInput or input.UserInputType == Enum.UserInputType.Touch or input.UserInputType.MouseMovement) then
+		if swiping and (input == swipeInput or input.UserInputType == Enum.UserInputType.Touch or input.UserInputType == Enum.UserInputType.MouseMovement) then
 			local deltaY = input.Position.Y - startY
 			local minY = -reelHeight
 			local maxY = 0
@@ -890,7 +943,7 @@ do
 	end)
 
 	UserInputService.InputChanged:Connect(function(input)
-		if sliding and (input == slideInput or input.UserInputType == Enum.UserInputType.Touch or input.UserInputType.MouseMovement) then
+		if sliding and (input == slideInput or input.UserInputType == Enum.UserInputType.Touch or input.UserInputType == Enum.UserInputType.MouseMovement) then
 			updateFromX(input.Position.X)
 		end
 	end)
@@ -982,6 +1035,10 @@ end)
 local function getOwnDmxFolder()
 	local carModel = getOwnCarModel(player)
 	if not carModel then return nil end
+	local misc = carModel:FindFirstChild("Misc")
+	if misc and misc:FindFirstChild("DmxLights") then
+		return misc:FindFirstChild("DmxLights")
+	end
 	local folder = carModel:FindFirstChild("Folder")
 	return (folder and folder:FindFirstChild("DmxLights")) or carModel:FindFirstChild("DmxLights", true)
 end
@@ -1041,7 +1098,8 @@ local function refreshUI()
 	for _, boxIdx in ipairs(selList) do
 		table.insert(addrs, tostring(resolveFixtureForBox(boxIdx).Address))
 	end
-	local statusStr = "Selected Box: " .. ((#selList > 0) and table.concat(selList, ", ") or "None")
+	local statusStr = "Universe: U" .. state.universe .. (state.universe == 2 and " (512B)" or " (3B)")
+		.. "\nSelected Box: " .. ((#selList > 0) and table.concat(selList, ", ") or "None")
 		.. "\nStart Addr: " .. ((#addrs > 0) and table.concat(addrs, ", ") or "None")
 		.. "\nDevices Power: " .. (state.devicesPowerOn and "ON" or "OFF")
 		.. "\nRemote: " .. (transport.DataRemote and transport.DataRemote:GetFullName() or "Waiting " .. REMOTE_NAME .. "...")
@@ -1095,6 +1153,7 @@ end)
 universeBtn.MouseButton1Click:Connect(function()
 	state.universe = (state.universe == 1) and 2 or 1
 	state.page = 1
+	state.selectedBoxes = {}
 	refreshUI()
 end)
 
@@ -1155,13 +1214,15 @@ tiltBtn.MouseButton1Click:Connect(function()
 end)
 
 local function resetPatchState()
-	state.rawByUniv[state.universe] = {}
-	state.patchedByUniv[state.universe] = {}
-	state.addedCountByUniv[state.universe] = 0
+	local u = state.universe
+	state.rawByUniv[u] = {}
+	state.patchedByUniv[u] = {}
+	state.addedCountByUniv[u] = 0
 	state.selectedBoxes = {}
 	state.devicesPowerOn = false
 	state.nextAddress = 1
 	state.page = 1
+	transport:ClearUniverse(u)
 	refreshUI()
 end
 
