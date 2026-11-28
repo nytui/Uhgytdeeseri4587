@@ -1,7 +1,7 @@
--- DmxConsoleUI_SnapSwipe_Full.lua
--- Ukuran tetap normal (350x340) + Snap Swipe atas/bawah ala TikTok/Shorts
--- Tema gelap + Preferensi (Pan/Tilt + number° + fader) + No Auto-Gate on Select + Devices Power di Setting
--- Auto-spill > 512 generik ke Universe 2 + Transport U1 (3-byte) & U2 ({ [2] = buf512 })
+-- DmxConsoleUI_SnapSwipe_DynamicParams.lua
+-- Desain & tema gelap tetap (350x340) + Snap Swipe ↕
+-- Parameter di Preferensi otomatis ngikutin device yang dipilih (Wallwasher: Effect/Warna/SpeedEffect | Clara: Pan/Tilt/Gobo/Prism/dll.)
+-- Auto-spill > 512 ke Universe 2 + Transport U1 (3-byte buffer) & U2 ({ [2] = buf512 }) -> UDP_DMXDATA
 
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -66,6 +66,38 @@ if not PatchEngine.Profiles then
 		["Windmill"] = { Group = "Windmill", Span = 8, Dimmer = 0, Shutter = 1, Speed = 2, Effect = 3, Red = 5, Green = 6, Blue = 7 },
 	}
 end
+
+-- Urutan & label parameter per jenis fixture biar tampilannya natural & ringkas
+local PARAM_META = {
+	X = { label = "Pan", maxDeg = 540 },
+	Y = { label = "Tilt", maxDeg = 270 },
+	PanFine = { label = "PanFine" },
+	TiltFine = { label = "TiltFine" },
+	Dimmer = { label = "Dimmer" },
+	Shutter = { label = "Shutter" },
+	Red = { label = "Warna R" },
+	Green = { label = "Warna G" },
+	Blue = { label = "Warna B" },
+	White = { label = "Warna W" },
+	Color = { label = "Warna" },
+	Gobo = { label = "Gobo" },
+	Prism = { label = "Prisma" },
+	Effect = { label = "Effect" },
+	Focus = { label = "Focus" },
+	Speed = { label = "SpeedEffect" },
+	GoboRotation = { label = "GoboRot" },
+}
+
+local DEVICE_PARAM_ORDER = {
+	["ClaraS14"] = { "X", "Y", "Gobo", "Prism", "Color", "Dimmer", "Shutter", "Focus", "Speed", "PanFine", "TiltFine" },
+	["Wallwasher_24X3W"] = { "Effect", "Red", "Green", "Blue", "Speed", "Dimmer", "Shutter" },
+	["StrobeBar_192_Segment"] = { "Effect", "Red", "Green", "Blue", "Speed", "Dimmer", "Shutter" },
+	["STROBE_1000W"] = { "Dimmer", "Shutter", "Red", "Green", "Blue", "Effect", "Speed" },
+	["Parled"] = { "Red", "Green", "Blue", "White", "Dimmer", "Shutter" },
+	["BlinderRing_2x50W"] = { "Dimmer", "Shutter", "Red", "Green", "Blue", "Effect", "Speed" },
+	["Fogger"] = { "X", "Dimmer", "Shutter", "Red", "Green", "Blue", "Effect" },
+	["Pixelbeambar"] = { "Y", "Effect", "Red", "Green", "Blue", "Speed", "Dimmer", "Shutter" },
+}
 
 local NameAliases = {
 	["ClaraS14"] = { "claras14", "clara_s14", "clara s14" },
@@ -291,7 +323,8 @@ local state = {
 	fixtureIndex = 1,
 	addedCountByUniv = { [1] = 0, [2] = 0 },
 	selectedBoxes = {},
-	axisMode = "Pan",
+	activeParamKey = "X",
+	paramRatios = {},
 	rawByUniv = { [1] = {}, [2] = {} },
 	patchedByUniv = { [1] = {}, [2] = {} },
 	nextAddress = 1,
@@ -316,6 +349,28 @@ local function getSelectedBoxList()
 	return list
 end
 
+local function buildChannelsFromProfile(addr, span, prof)
+	return {
+		X = toAbsChannel(addr, prof.X, span),
+		Y = toAbsChannel(addr, prof.Y, span),
+		PanFine = toAbsChannel(addr, prof.PanFine, span),
+		TiltFine = toAbsChannel(addr, prof.TiltFine, span),
+		Shutter = toAbsChannel(addr, prof.Shutter, span),
+		Dimmer = toAbsChannel(addr, prof.Dimmer, span),
+		Color = toAbsChannel(addr, prof.Color, span),
+		Gobo = toAbsChannel(addr, prof.Gobo, span),
+		Prism = toAbsChannel(addr, prof.Prism, span),
+		Effect = toAbsChannel(addr, prof.Effect, span),
+		Focus = toAbsChannel(addr, prof.Focus, span),
+		Speed = toAbsChannel(addr, prof.Speed or prof.GoboRotation, span),
+		GoboRotation = toAbsChannel(addr, prof.GoboRotation or prof.Speed, span),
+		Red = toAbsChannel(addr, prof.Red, span),
+		Green = toAbsChannel(addr, prof.Green, span),
+		Blue = toAbsChannel(addr, prof.Blue, span),
+		White = toAbsChannel(addr, prof.White, span),
+	}
+end
+
 local function resolveFixtureForBox(boxIdx)
 	local patched = state.patchedByUniv[state.universe] or {}
 	if patched[boxIdx] then
@@ -330,13 +385,59 @@ local function resolveFixtureForBox(boxIdx)
 		Span = span,
 		Universe = state.universe,
 		Type = profName,
-		Channels = {
-			X = toAbsChannel(fallbackAddr, prof.X, span),
-			Y = toAbsChannel(fallbackAddr, prof.Y, span),
-			Shutter = toAbsChannel(fallbackAddr, prof.Shutter, span),
-			Dimmer = toAbsChannel(fallbackAddr, prof.Dimmer, span),
-		},
+		Channels = buildChannelsFromProfile(fallbackAddr, span, prof),
 	}
+end
+
+local function getActiveDeviceType()
+	local selList = getSelectedBoxList()
+	if #selList > 0 then
+		local firstFix = resolveFixtureForBox(selList[1])
+		if firstFix and firstFix.Type then
+			return firstFix.Type
+		end
+	end
+	return getSelectedFixtureName()
+end
+
+local function getAvailableParamsForDevice(devType)
+	local prof = PatchEngine.Profiles[devType] or {}
+	local available = {}
+	local seen = {}
+
+	local preferredOrder = DEVICE_PARAM_ORDER[devType] or {}
+	for _, key in ipairs(preferredOrder) do
+		if type(prof[key]) == "number" and not seen[key] then
+			seen[key] = true
+			table.insert(available, key)
+		end
+	end
+
+	for key, val in pairs(prof) do
+		if type(val) == "number" and key ~= "Span" and not seen[key] then
+			seen[key] = true
+			table.insert(available, key)
+		end
+	end
+
+	if #available == 0 then
+		table.insert(available, "X")
+		table.insert(available, "Y")
+	end
+
+	return available
+end
+
+local function ensureValidActiveParam()
+	local devType = getActiveDeviceType()
+	local params = getAvailableParamsForDevice(devType)
+	for _, k in ipairs(params) do
+		if k == state.activeParamKey then
+			return params
+		end
+	end
+	state.activeParamKey = params[1]
+	return params
 end
 
 local function getTargetFixtures()
@@ -394,19 +495,15 @@ local function setDevicesPower(isOn)
 	updateBadge()
 end
 
-local function applyAxisToSelected(dmxVal)
+local function applyParamToSelected(paramKey, dmxVal)
 	local clamped = math.clamp(math.floor(dmxVal), 0, 255)
-	local isPan = (state.axisMode == "Pan")
-	local roleKey = isPan and "X" or "Y"
-	local fallbackOff1 = isPan and 1 or 2
 	local u = state.universe
-
 	local seen = {}
+
 	for boxIdx, isSel in pairs(state.selectedBoxes) do
 		if isSel then
 			local fix = resolveFixtureForBox(boxIdx)
-			local targetCh = (fix.Channels and fix.Channels[roleKey])
-				or toAbsChannel(fix.Address, fallbackOff1 - 1, fix.Span or 8)
+			local targetCh = fix.Channels and fix.Channels[paramKey]
 			if targetCh and not seen[targetCh] then
 				seen[targetCh] = true
 				transport:SendChannel(u, targetCh, clamped, false)
@@ -449,22 +546,7 @@ local function rebuildAllUniverses()
 				Span = span,
 				Universe = targetUniv,
 				Type = fix.Type,
-				Channels = {
-					X = toAbsChannel(addr, prof.X, span),
-					Y = toAbsChannel(addr, prof.Y, span),
-					PanFine = toAbsChannel(addr, prof.PanFine, span),
-					TiltFine = toAbsChannel(addr, prof.TiltFine, span),
-					Shutter = toAbsChannel(addr, prof.Shutter, span),
-					Dimmer = toAbsChannel(addr, prof.Dimmer or 0, span),
-					Color = toAbsChannel(addr, prof.Color, span),
-					Gobo = toAbsChannel(addr, prof.Gobo, span),
-					Prism = toAbsChannel(addr, prof.Prism or prof.Effect, span),
-					Focus = toAbsChannel(addr, prof.Focus, span),
-					Speed = toAbsChannel(addr, prof.Speed or prof.GoboRotation, span),
-					Red = toAbsChannel(addr, prof.Red, span),
-					Green = toAbsChannel(addr, prof.Green, span),
-					Blue = toAbsChannel(addr, prof.Blue, span),
-				},
+				Channels = buildChannelsFromProfile(addr, span, prof),
 			})
 			state.addedCountByUniv[targetUniv] += 1
 		end
@@ -537,7 +619,7 @@ do
 	end)
 
 	UserInputService.InputChanged:Connect(function(input)
-		if dragging and (input == dragInput or input.UserInputType == Enum.UserInputType.Touch or input.UserInputType.MouseMovement) then
+		if dragging and (input == dragInput or input.UserInputType == Enum.UserInputType.Touch or input.UserInputType == Enum.UserInputType.MouseMovement) then
 			local delta = Vector2.new(input.Position.X, input.Position.Y) - dragStart
 			mainFrame.Position = UDim2.new(
 				startPos.X.Scale, startPos.X.Offset + delta.X,
@@ -838,7 +920,7 @@ local badgeStroke = Instance.new("UIStroke", addrBadge)
 badgeStroke.Color = THEME.stroke
 badgeStroke.Thickness = 1
 
--- Tab 2: Preferensi (Pan, Tilt, number°, dan fader saja)
+-- Tab 2: Preferensi (Otomatis ngikutin device: Effect/Warna/SpeedEffect | Pan/Tilt/Gobo/Prisma/dll. + fader)
 local prefPage = Instance.new("Frame")
 prefPage.Size = UDim2.new(1, 0, 1, -108)
 prefPage.Position = UDim2.fromOffset(0, 108)
@@ -846,25 +928,48 @@ prefPage.BackgroundTransparency = 1
 prefPage.Visible = false
 prefPage.Parent = bodyFrame
 
-local panBtn = Instance.new("TextButton")
-panBtn.Size = UDim2.fromOffset(104, 26)
-panBtn.Position = UDim2.fromOffset(0, 8)
-panBtn.Text = "Pan"
-panBtn.TextSize = 13
-panBtn.Font = Enum.Font.GothamMedium
-panBtn.BorderSizePixel = 0
-panBtn.Parent = prefPage
-Instance.new("UICorner", panBtn).CornerRadius = UDim.new(0, 6)
+local paramSelectorRow = Instance.new("Frame")
+paramSelectorRow.Size = UDim2.new(1, -100, 0, 26)
+paramSelectorRow.Position = UDim2.fromOffset(0, 8)
+paramSelectorRow.BackgroundColor3 = THEME.surfaceAlt
+paramSelectorRow.BorderSizePixel = 0
+paramSelectorRow.Parent = prefPage
+Instance.new("UICorner", paramSelectorRow).CornerRadius = UDim.new(0, 6)
+local paramRowStroke = Instance.new("UIStroke", paramSelectorRow)
+paramRowStroke.Color = THEME.stroke
+paramRowStroke.Thickness = 1
 
-local tiltBtn = Instance.new("TextButton")
-tiltBtn.Size = UDim2.fromOffset(104, 26)
-tiltBtn.Position = UDim2.fromOffset(112, 8)
-tiltBtn.Text = "Tilt"
-tiltBtn.TextSize = 13
-tiltBtn.Font = Enum.Font.GothamMedium
-tiltBtn.BorderSizePixel = 0
-tiltBtn.Parent = prefPage
-Instance.new("UICorner", tiltBtn).CornerRadius = UDim.new(0, 6)
+local prevParamBtn = Instance.new("TextButton")
+prevParamBtn.Size = UDim2.fromOffset(28, 26)
+prevParamBtn.Position = UDim2.fromOffset(0, 0)
+prevParamBtn.BackgroundTransparency = 1
+prevParamBtn.Text = "◁"
+prevParamBtn.TextColor3 = THEME.muted
+prevParamBtn.TextSize = 13
+prevParamBtn.Font = Enum.Font.GothamBold
+prevParamBtn.Parent = paramSelectorRow
+
+local activeParamLabel = Instance.new("TextButton")
+activeParamLabel.Size = UDim2.new(1, -56, 1, 0)
+activeParamLabel.Position = UDim2.fromOffset(28, 0)
+activeParamLabel.BackgroundColor3 = THEME.accent
+activeParamLabel.Text = "Pan"
+activeParamLabel.TextColor3 = THEME.text
+activeParamLabel.TextSize = 12
+activeParamLabel.Font = Enum.Font.GothamBold
+activeParamLabel.BorderSizePixel = 0
+activeParamLabel.Parent = paramSelectorRow
+Instance.new("UICorner", activeParamLabel).CornerRadius = UDim.new(0, 5)
+
+local nextParamBtn = Instance.new("TextButton")
+nextParamBtn.Size = UDim2.fromOffset(28, 26)
+nextParamBtn.Position = UDim2.new(1, -28, 0, 0)
+nextParamBtn.BackgroundTransparency = 1
+nextParamBtn.Text = "▷"
+nextParamBtn.TextColor3 = THEME.muted
+nextParamBtn.TextSize = 13
+nextParamBtn.Font = Enum.Font.GothamBold
+nextParamBtn.Parent = paramSelectorRow
 
 local numberDegLabel = Instance.new("TextLabel")
 numberDegLabel.Size = UDim2.fromOffset(92, 26)
@@ -906,16 +1011,51 @@ faderThumb.BorderSizePixel = 0
 faderThumb.Parent = faderTrack
 Instance.new("UICorner", faderThumb).CornerRadius = UDim.new(0, 4)
 
-local function setFaderRatio(ratio)
-	local r = math.clamp(ratio, 0, 1)
+local function formatParamValueText(paramKey, ratio)
+	local meta = PARAM_META[paramKey] or {}
+	if meta.maxDeg then
+		local degVal = math.floor(ratio * meta.maxDeg + 0.5)
+		return tostring(degVal) .. "°"
+	end
+	return tostring(math.floor(ratio * 255 + 0.5))
+end
+
+local function syncFaderForActiveParam(sendDmx)
+	ensureValidActiveParam()
+	local key = state.activeParamKey
+	local r = math.clamp(state.paramRatios[key] or 0, 0, 1)
 	local maxOffset = math.max(1, faderTrack.AbsoluteSize.X - faderThumb.AbsoluteSize.X)
 	faderThumb.Position = UDim2.fromOffset(math.floor(r * maxOffset), -8)
 
-	local maxSpanDeg = (state.axisMode == "Pan") and 540 or 270
-	local degVal = math.floor(r * maxSpanDeg + 0.5)
-	local dmxVal = math.floor(r * 255 + 0.5)
-	numberDegLabel.Text = tostring(degVal) .. "°"
-	applyAxisToSelected(dmxVal)
+	local meta = PARAM_META[key] or {}
+	activeParamLabel.Text = meta.label or key
+	numberDegLabel.Text = formatParamValueText(key, r)
+
+	if sendDmx then
+		local dmxVal = math.floor(r * 255 + 0.5)
+		applyParamToSelected(key, dmxVal)
+	end
+end
+
+local function setFaderRatio(ratio)
+	ensureValidActiveParam()
+	local key = state.activeParamKey
+	state.paramRatios[key] = math.clamp(ratio, 0, 1)
+	syncFaderForActiveParam(true)
+end
+
+local function cycleParam(step)
+	local params = ensureValidActiveParam()
+	local curIdx = 1
+	for i, k in ipairs(params) do
+		if k == state.activeParamKey then
+			curIdx = i
+			break
+		end
+	end
+	local nextIdx = ((curIdx - 1 + step) % #params) + 1
+	state.activeParamKey = params[nextIdx]
+	syncFaderForActiveParam(false)
 end
 
 do
@@ -1052,12 +1192,6 @@ local function refreshUI()
 	pageLabel.Text = "page " .. state.page
 	syncPowerButtonStyle()
 
-	panBtn.BackgroundColor3 = (state.axisMode == "Pan") and THEME.accent or THEME.surfaceAlt
-	panBtn.TextColor3 = (state.axisMode == "Pan") and THEME.text or THEME.muted
-
-	tiltBtn.BackgroundColor3 = (state.axisMode == "Tilt") and THEME.accent or THEME.surfaceAlt
-	tiltBtn.TextColor3 = (state.axisMode == "Tilt") and THEME.text or THEME.muted
-
 	for _, child in ipairs(channelFrame:GetChildren()) do
 		if child:IsA("TextButton") then
 			child:Destroy()
@@ -1095,14 +1229,17 @@ local function refreshUI()
 		end
 	end
 
+	syncFaderForActiveParam(false)
+
 	updateBadge()
 	local selList = getSelectedBoxList()
 	local addrs = {}
 	for _, boxIdx in ipairs(selList) do
 		table.insert(addrs, tostring(resolveFixtureForBox(boxIdx).Address))
 	end
+	local activeDev = getActiveDeviceType()
 	local statusStr = "Universe: U" .. state.universe .. (state.universe == 2 and " (512B)" or " (3B)")
-		.. "\nU1/U2 Count: " .. (state.addedCountByUniv[1] or 0) .. " / " .. (state.addedCountByUniv[2] or 0)
+		.. "\nDevice: " .. activeDev
 		.. "\nSelected Box: " .. ((#selList > 0) and table.concat(selList, ", ") or "None")
 		.. "\nStart Addr: " .. ((#addrs > 0) and table.concat(addrs, ", ") or "None")
 		.. "\nDevices Power: " .. (state.devicesPowerOn and "ON" or "OFF")
@@ -1134,6 +1271,11 @@ for _, tName in ipairs(tabNames) do
 		prefPage.Visible = (tName == "Preferensi")
 		mainPage.Visible = (tName == "main")
 		settingPage.Visible = (tName == "Setting")
+		if tName == "Preferensi" then
+			task.defer(function()
+				syncFaderForActiveParam(false)
+			end)
+		end
 	end)
 end
 
@@ -1196,14 +1338,16 @@ nextPageBtn.MouseButton1Click:Connect(function()
 	refreshUI()
 end)
 
-panBtn.MouseButton1Click:Connect(function()
-	state.axisMode = "Pan"
-	refreshUI()
+prevParamBtn.MouseButton1Click:Connect(function()
+	cycleParam(-1)
 end)
 
-tiltBtn.MouseButton1Click:Connect(function()
-	state.axisMode = "Tilt"
-	refreshUI()
+nextParamBtn.MouseButton1Click:Connect(function()
+	cycleParam(1)
+end)
+
+activeParamLabel.MouseButton1Click:Connect(function()
+	cycleParam(1)
 end)
 
 local function resetPatchState()
@@ -1216,6 +1360,7 @@ local function resetPatchState()
 	end
 	state.selectedBoxes = {}
 	state.devicesPowerOn = false
+	state.paramRatios = {}
 	state.nextAddress = 1
 	state.page = 1
 	refreshUI()
