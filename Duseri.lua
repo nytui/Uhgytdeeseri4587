@@ -1,9 +1,9 @@
 --!strict
--- DMX Controller UI (350x340) - Full Build
+-- DMX Controller UI (350x340) - Full Build (Car UDP_DMXDATA 3-Byte Buffer)
 -- Tabs via Top Buttons Only | Minimize (-) & Close (X) | Mobile Drag | Clear All Fixtures
 
 local Players = game:GetService("Players")
-local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Workspace = game:GetService("Workspace")
 local UserInputService = game:GetService("UserInputService")
 local TweenService = game:GetService("TweenService")
 
@@ -13,30 +13,52 @@ local playerGui = player:WaitForChild("PlayerGui")
 local MAX_CHANNELS = 512
 local MIN_VALUE = 0
 local MAX_VALUE = 255
-local SEND_THROTTLE = 0.04
+local SEND_THROTTLE = 0.03
 
---// Remote Event Resolver
-local function resolveRemote(): RemoteEvent?
-	local remotesFolder = ReplicatedStorage:FindFirstChild("Remotes")
-	if remotesFolder then
-		local udp = remotesFolder:FindFirstChild("UDP_DMXDATA")
-		if udp and udp:IsA("RemoteEvent") then
-			return udp
+--// Car UDP_DMXDATA Resolver (<PlayerName>'s Car -> UDP_DMXDATA)
+local function findCarDmxRemote(): RemoteEvent?
+	local vehicles = Workspace:FindFirstChild("Vehicles")
+	if not vehicles then
+		return nil
+	end
+
+	for _, car in ipairs(vehicles:GetChildren()) do
+		if string.match(car.Name, "^(.-)'s Car$") == player.Name then
+			local remote = car:FindFirstChild("UDP_DMXDATA")
+			if remote and remote:IsA("RemoteEvent") then
+				return remote
+			end
 		end
 	end
-	local direct = ReplicatedStorage:FindFirstChild("UDP_DMXDATA")
-	if direct and direct:IsA("RemoteEvent") then
-		return direct
-	end
-	for _, obj in ipairs(ReplicatedStorage:GetDescendants()) do
-		if obj:IsA("RemoteEvent") and obj.Name == "UDP_DMXDATA" then
-			return obj
-		end
-	end
+
 	return nil
 end
 
-local udpRemote = resolveRemote()
+local udpRemote: RemoteEvent? = findCarDmxRemote()
+
+task.spawn(function()
+	local vehicles = Workspace:FindFirstChild("Vehicles")
+	if not vehicles then
+		vehicles = Workspace:WaitForChild("Vehicles", 30)
+	end
+	if not vehicles then
+		return
+	end
+
+	if not udpRemote then
+		udpRemote = findCarDmxRemote()
+	end
+
+	vehicles.ChildAdded:Connect(function(car)
+		task.wait(0.1)
+		if string.match(car.Name, "^(.-)'s Car$") == player.Name then
+			local remote = car:WaitForChild("UDP_DMXDATA", 20)
+			if remote and remote:IsA("RemoteEvent") then
+				udpRemote = remote
+			end
+		end
+	end)
+end)
 
 --// Fixture Profiles & Parameter Order
 local BarWashProfile = {
@@ -277,10 +299,11 @@ local function patchDevice(devType: string)
 	rebuildAllUniverses()
 end
 
-local function sendChannelValue(univ: number, channel: number, rawVal: number)
+local function sendChannelValue(univ: number, channel: number, rawVal: number, bypassThrottle: boolean?)
 	if channel < 1 or channel > MAX_CHANNELS then
 		return
 	end
+
 	local val = math.clamp(math.floor(rawVal + 0.5), MIN_VALUE, MAX_VALUE)
 	ensureUniverse(univ)
 	buffer.writeu8(state.univBuffers[univ], channel - 1, val)
@@ -290,19 +313,28 @@ local function sendChannelValue(univ: number, channel: number, rawVal: number)
 	local lastT = state.lastSendTime[key] or 0
 	local lastV = state.lastSentVal[key]
 
-	if lastV == val then
-		return
-	end
-	if (now - lastT) < SEND_THROTTLE then
-		return
+	if not bypassThrottle then
+		if lastV == val then
+			return
+		end
+		if (now - lastT) < SEND_THROTTLE then
+			return
+		end
 	end
 
 	state.lastSendTime[key] = now
 	state.lastSentVal[key] = val
 
+	if not udpRemote then
+		udpRemote = findCarDmxRemote()
+	end
+
 	if udpRemote then
+		local buf = buffer.create(3)
+		buffer.writeu16(buf, 0, channel)
+		buffer.writeu8(buf, 2, val)
 		pcall(function()
-			udpRemote:FireServer(univ, channel, val)
+			udpRemote:FireServer(buf)
 		end)
 	end
 end
@@ -493,34 +525,31 @@ end)
 -- Dragging support on Header (Mobile + PC)
 do
 	local dragging = false
-	local dragInput: InputObject? = nil
 	local dragStart = Vector2.zero
 	local startPos = UDim2.new()
 
 	header.InputBegan:Connect(function(input)
 		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
 			dragging = true
-			dragInput = input
 			dragStart = Vector2.new(input.Position.X, input.Position.Y)
 			startPos = mainFrame.Position
-
-			input.Changed:Connect(function()
-				if input.UserInputState == Enum.UserInputState.End then
-					dragging = false
-					dragInput = nil
-				end
-			end)
 		end
 	end)
 
-	header.InputChanged:Connect(function(input)
-		if input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch then
-			dragInput = input
+	header.InputEnded:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+			dragging = false
+		end
+	end)
+
+	UserInputService.InputEnded:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+			dragging = false
 		end
 	end)
 
 	UserInputService.InputChanged:Connect(function(input)
-		if dragging and input == dragInput then
+		if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
 			local delta = Vector2.new(input.Position.X, input.Position.Y) - dragStart
 			mainFrame.Position = UDim2.new(
 				startPos.X.Scale,
@@ -877,32 +906,36 @@ local function syncParamAndFader()
 	faderValueLabel.Text = formatRatioText(state.activeParam, ratio)
 end
 
-local function applyRatioToTargets(paramName: string, ratio: number)
-	local r = math.clamp(ratio, 0, 1)
-	state.paramRatios[paramName] = r
-
+local function getTargetFixtures(): { PatchedItem }
 	local list = state.patchedByUniv[state.universe] or {}
+	local targets: { PatchedItem } = {}
 	local anySelected = false
+
 	for idx, isSel in pairs(state.selectedIndices) do
 		if isSel and list[idx] then
 			anySelected = true
-			local offset = list[idx].Profile[paramName]
-			if type(offset) == "number" then
-				local ch = list[idx].Address + offset
-				local rawVal = math.clamp(math.floor(r * MAX_VALUE + 0.5), MIN_VALUE, MAX_VALUE)
-				sendChannelValue(state.universe, ch, rawVal)
-			end
+			table.insert(targets, list[idx])
 		end
 	end
 
 	if not anySelected then
 		for _, item in ipairs(list) do
-			local offset = item.Profile[paramName]
-			if type(offset) == "number" then
-				local ch = item.Address + offset
-				local rawVal = math.clamp(math.floor(r * MAX_VALUE + 0.5), MIN_VALUE, MAX_VALUE)
-				sendChannelValue(state.universe, ch, rawVal)
-			end
+			table.insert(targets, item)
+		end
+	end
+
+	return targets
+end
+
+local function applyRatioToTargets(paramName: string, ratio: number)
+	local r = math.clamp(ratio, 0, 1)
+	state.paramRatios[paramName] = r
+	local rawVal = math.clamp(math.floor(r * MAX_VALUE + 0.5), MIN_VALUE, MAX_VALUE)
+
+	for _, item in ipairs(getTargetFixtures()) do
+		local offset = item.Profile[paramName]
+		if type(offset) == "number" then
+			sendChannelValue(state.universe, item.Address + offset, rawVal, false)
 		end
 	end
 
@@ -923,8 +956,8 @@ local function refreshGridAndLabels()
 	end
 
 	local list = state.patchedByUniv[state.universe] or {}
-	local badgeParts = {}
-	local detailLines = {}
+	local badgeParts: { string } = {}
+	local detailLines: { string } = {}
 
 	for idx, item in ipairs(list) do
 		local tag = getShortTag(item.Type)
@@ -986,18 +1019,10 @@ local function clearCurrentUniverseFixtures()
 	ensureUniverse(univ)
 
 	local list = state.patchedByUniv[univ] or {}
-	if udpRemote then
-		for _, item in ipairs(list) do
-			local prof = item.Profile
-			for key, offset in pairs(prof) do
-				if key ~= "Group" and key ~= "Span" and type(offset) == "number" then
-					local ch = item.Address + offset
-					if ch >= 1 and ch <= MAX_CHANNELS then
-						pcall(function()
-							udpRemote:FireServer(univ, ch, 0)
-						end)
-					end
-				end
+	for _, item in ipairs(list) do
+		for key, offset in pairs(item.Profile) do
+			if key ~= "Group" and key ~= "Span" and type(offset) == "number" then
+				sendChannelValue(univ, item.Address + offset, 0, true)
 			end
 		end
 	end
@@ -1127,10 +1152,10 @@ blackoutBtn.MouseButton1Click:Connect(function()
 	local list = state.patchedByUniv[state.universe] or {}
 	for _, item in ipairs(list) do
 		if type(item.Profile.Dimmer) == "number" then
-			sendChannelValue(state.universe, item.Address + item.Profile.Dimmer, 0)
+			sendChannelValue(state.universe, item.Address + item.Profile.Dimmer, 0, true)
 		end
 		if type(item.Profile.Shutter) == "number" then
-			sendChannelValue(state.universe, item.Address + item.Profile.Shutter, 0)
+			sendChannelValue(state.universe, item.Address + item.Profile.Shutter, 0, true)
 		end
 	end
 	syncParamAndFader()
@@ -1141,7 +1166,7 @@ masterFullBtn.MouseButton1Click:Connect(function()
 	local list = state.patchedByUniv[state.universe] or {}
 	for _, item in ipairs(list) do
 		if type(item.Profile.Dimmer) == "number" then
-			sendChannelValue(state.universe, item.Address + item.Profile.Dimmer, 255)
+			sendChannelValue(state.universe, item.Address + item.Profile.Dimmer, MAX_VALUE, true)
 		end
 	end
 	syncParamAndFader()
