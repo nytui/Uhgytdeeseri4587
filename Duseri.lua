@@ -1,71 +1,85 @@
 --!strict
--- DMX Controller UI (350x340) - Full Build (Car UDP_DMXDATA 3-Byte Buffer)
--- Tabs via Top Buttons Only | Minimize (-) & Close (X) | Mobile Drag | Clear All Fixtures
+-- DMX Controller UI (350x340) - Synced With Working Tes_Beam_UDP_DMXDATA Logic
 
 local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Workspace = game:GetService("Workspace")
 local UserInputService = game:GetService("UserInputService")
 local TweenService = game:GetService("TweenService")
 
-local player = Players.LocalPlayer
-local playerGui = player:WaitForChild("PlayerGui")
+local player = Players.LocalPlayer or Players.PlayerAdded:Wait()
+local parentGui = (gethui and gethui()) or player:WaitForChild("PlayerGui")
 
 local MAX_CHANNELS = 512
 local MIN_VALUE = 0
 local MAX_VALUE = 255
 local SEND_THROTTLE = 0.03
 
---// Car UDP_DMXDATA Resolver (<PlayerName>'s Car -> UDP_DMXDATA)
-local function findCarDmxRemote(): RemoteEvent?
+--// Remote Resolver (Same priority as Tes_Beam_UDP_DMXDATA)
+local function isDmxRemote(obj: Instance): boolean
+	return obj:IsA("RemoteEvent") or obj:IsA("UnreliableRemoteEvent")
+end
+
+local function getOwnCar(): Instance?
 	local vehicles = Workspace:FindFirstChild("Vehicles")
 	if not vehicles then
 		return nil
 	end
-
-	for _, car in ipairs(vehicles:GetChildren()) do
-		if string.match(car.Name, "^(.-)'s Car$") == player.Name then
-			local remote = car:FindFirstChild("UDP_DMXDATA")
-			if remote and remote:IsA("RemoteEvent") then
-				return remote
-			end
+	local lp = string.lower(player.Name)
+	for _, c in ipairs(vehicles:GetChildren()) do
+		if c.Name == player.Name .. "'s Car" or string.find(string.lower(c.Name), lp, 1, true) then
+			return c
 		end
 	end
-
 	return nil
 end
 
-local udpRemote: RemoteEvent? = findCarDmxRemote()
+local function findUdpDmxRemote(): (any, string)
+	local car = getOwnCar()
+	if car then
+		local r = car:FindFirstChild("UDP_DMXDATA", true)
+		if r and isDmxRemote(r) then
+			return r, "CAR:" .. car.Name
+		end
+	end
+
+	local rRs = ReplicatedStorage:FindFirstChild("UDP_DMXDATA", true)
+	if rRs and isDmxRemote(rRs) then
+		return rRs, "RS"
+	end
+
+	local rWs = Workspace:FindFirstChild("UDP_DMXDATA", true)
+	if rWs and isDmxRemote(rWs) then
+		return rWs, "WS"
+	end
+
+	return nil, "UDP_DMXDATA tidak ditemukan"
+end
+
+local udpRemote: any, remoteSrc: string = findUdpDmxRemote()
 
 task.spawn(function()
-	local vehicles = Workspace:FindFirstChild("Vehicles")
-	if not vehicles then
-		vehicles = Workspace:WaitForChild("Vehicles", 30)
-	end
-	if not vehicles then
-		return
-	end
-
+	local vehicles = Workspace:FindFirstChild("Vehicles") or Workspace:WaitForChild("Vehicles", 30)
 	if not udpRemote then
-		udpRemote = findCarDmxRemote()
+		udpRemote, remoteSrc = findUdpDmxRemote()
 	end
-
-	vehicles.ChildAdded:Connect(function(car)
-		task.wait(0.1)
-		if string.match(car.Name, "^(.-)'s Car$") == player.Name then
-			local remote = car:WaitForChild("UDP_DMXDATA", 20)
-			if remote and remote:IsA("RemoteEvent") then
-				udpRemote = remote
+	if vehicles then
+		vehicles.ChildAdded:Connect(function()
+			task.wait(0.15)
+			local r, src = findUdpDmxRemote()
+			if r then
+				udpRemote, remoteSrc = r, src
 			end
-		end
-	end)
+		end)
+	end
 end)
 
---// Fixture Profiles & Parameter Order
+--// Fixture Profiles (Offset relative to Address: Address=1 -> CH 1=Pan, CH 2=Tilt, CH 7=Shutter, CH 8=Dimmer)
 local BarWashProfile = {
 	Group = "BarWash",
 	Span = 8,
-	Dimmer = 0,
-	Shutter = 1,
+	Dimmer = 7,
+	Shutter = 6,
 	Red = 2,
 	Green = 3,
 	Blue = 4,
@@ -78,56 +92,57 @@ local DEVICE_PROFILES: { [string]: { [string]: any } } = {
 	["ClaraS14"] = {
 		Group = "MovingHead",
 		Span = 16,
-		Pan = 0,
-		Tilt = 1,
-		Dimmer = 5,
-		Shutter = 6,
-		Color = 7,
-		Gobo = 8,
-		Prism = 9,
-		Focus = 10,
-		Speed = 11,
+		Pan = 0,     -- Address + 0 (CH 1)
+		Tilt = 1,    -- Address + 1 (CH 2)
+		Shutter = 6, -- Address + 6 (CH 7)
+		Dimmer = 7,  -- Address + 7 (CH 8)
+		Color = 2,
+		Gobo = 3,
+		Prism = 4,
+		Focus = 5,
+		Speed = 8,
 	},
 	["Wallwasher_24X3W"] = BarWashProfile,
 	["StrobeBar_192_Segment"] = BarWashProfile,
 	["STROBE_1000W"] = {
 		Group = "Strobe1000W",
 		Span = 8,
-		Dimmer = 0,
-		Effect = 5,
-		Effect2 = 6,
-		Speed = 7,
+		Shutter = 6,
+		Dimmer = 7,
+		Effect = 4,
+		Effect2 = 5,
+		Speed = 8,
 	},
 	["Parled"] = {
 		Group = "Parled",
-		Span = 6,
-		Dimmer = 0,
+		Span = 8,
 		Red = 1,
 		Green = 2,
 		Blue = 3,
 		White = 4,
-		Shutter = 5,
+		Shutter = 6,
+		Dimmer = 7,
 	},
 	["Blinder"] = {
 		Group = "Blinder",
 		Span = 8,
-		Dimmer = 0,
 		Red = 1,
 		Green = 2,
 		Blue = 3,
-		Shutter = 4,
-		Effect = 5,
-		Speed = 7,
+		Shutter = 6,
+		Dimmer = 7,
+		Effect = 4,
+		Speed = 5,
 	},
 }
 
 local DEVICE_PARAM_ORDER: { [string]: { string } } = {
-	["ClaraS14"] = { "Dimmer", "Pan", "Tilt", "Color", "Gobo", "Prism", "Focus", "Shutter", "Speed" },
+	["ClaraS14"] = { "Dimmer", "Shutter", "Pan", "Tilt", "Color", "Gobo", "Prism", "Focus", "Speed" },
 	["Wallwasher_24X3W"] = { "Dimmer", "Shutter", "Red", "Green", "Blue", "Effect", "Effect2", "Speed" },
 	["StrobeBar_192_Segment"] = { "Dimmer", "Shutter", "Red", "Green", "Blue", "Effect", "Effect2", "Speed" },
-	["STROBE_1000W"] = { "Dimmer", "Effect", "Effect2", "Speed" },
-	["Parled"] = { "Dimmer", "Red", "Green", "Blue", "White", "Shutter" },
-	["Blinder"] = { "Dimmer", "Red", "Green", "Blue", "Shutter", "Effect", "Speed" },
+	["STROBE_1000W"] = { "Dimmer", "Shutter", "Effect", "Effect2", "Speed" },
+	["Parled"] = { "Dimmer", "Shutter", "Red", "Green", "Blue", "White" },
+	["Blinder"] = { "Dimmer", "Shutter", "Red", "Green", "Blue", "Effect", "Speed" },
 }
 
 local PARAM_META: { [string]: { label: string, kind: string } } = {
@@ -172,7 +187,8 @@ local function getProfile(devType: string): { [string]: any }
 	return DEVICE_PROFILES[devType] or {
 		Group = "Generic",
 		Span = 8,
-		Dimmer = 0,
+		Dimmer = 7,
+		Shutter = 6,
 	}
 end
 
@@ -194,7 +210,6 @@ local function getParamListForDevice(devType: string): { string }
 	return out
 end
 
---// Patch & Universe State
 type PatchedItem = {
 	Index: number,
 	Type: string,
@@ -221,7 +236,7 @@ local state = {
 		Effect2 = 0,
 		Speed = 0,
 		Pan = 0.5,
-		Tilt = 0.5,
+		Tilt = 43 / 255,
 		Color = 0,
 		Gobo = 0,
 		Prism = 0,
@@ -326,7 +341,7 @@ local function sendChannelValue(univ: number, channel: number, rawVal: number, b
 	state.lastSentVal[key] = val
 
 	if not udpRemote then
-		udpRemote = findCarDmxRemote()
+		udpRemote, remoteSrc = findUdpDmxRemote()
 	end
 
 	if udpRemote then
@@ -340,7 +355,7 @@ local function sendChannelValue(univ: number, channel: number, rawVal: number, b
 end
 
 --// UI Construction (350x340)
-local existingGui = playerGui:FindFirstChild("DMXController350x340")
+local existingGui = parentGui:FindFirstChild("DMXController350x340")
 if existingGui then
 	existingGui:Destroy()
 end
@@ -349,7 +364,7 @@ local screenGui = Instance.new("ScreenGui")
 screenGui.Name = "DMXController350x340"
 screenGui.ResetOnSpawn = false
 screenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
-screenGui.Parent = playerGui
+screenGui.Parent = parentGui
 
 local mainFrame = Instance.new("Frame")
 mainFrame.Name = "MainFrame"
@@ -359,7 +374,6 @@ mainFrame.BackgroundColor3 = Color3.fromRGB(16, 19, 26)
 mainFrame.BorderSizePixel = 0
 mainFrame.Active = true
 mainFrame.Parent = screenGui
-
 Instance.new("UICorner", mainFrame).CornerRadius = UDim.new(0, 10)
 
 local mainStroke = Instance.new("UIStroke")
@@ -367,7 +381,6 @@ mainStroke.Color = Color3.fromRGB(45, 55, 75)
 mainStroke.Thickness = 1
 mainStroke.Parent = mainFrame
 
--- Header Bar + Minimize (-) + Close (X) + Mobile Drag
 local header = Instance.new("Frame")
 header.Name = "Header"
 header.Size = UDim2.new(1, 0, 0, 34)
@@ -375,7 +388,6 @@ header.BackgroundColor3 = Color3.fromRGB(23, 28, 38)
 header.BorderSizePixel = 0
 header.Active = true
 header.Parent = mainFrame
-
 Instance.new("UICorner", header).CornerRadius = UDim.new(0, 10)
 
 local titleLabel = Instance.new("TextLabel")
@@ -430,7 +442,6 @@ closeBtn.Active = true
 closeBtn.Parent = header
 Instance.new("UICorner", closeBtn).CornerRadius = UDim.new(0, 5)
 
--- Tab Switcher Bar (Top Buttons Only)
 local tabBar = Instance.new("Frame")
 tabBar.Size = UDim2.new(1, -16, 0, 26)
 tabBar.Position = UDim2.fromOffset(8, 38)
@@ -457,7 +468,6 @@ end
 local tabPrefBtn = makeTabBtn("Preferensi", 2)
 local tabReel2Btn = makeTabBtn("Reel 2", 171)
 
--- Page Container (Button-Driven Only, No Swipe)
 local pagesViewport = Instance.new("Frame")
 pagesViewport.Size = UDim2.new(1, -16, 0, 266)
 pagesViewport.Position = UDim2.fromOffset(8, 68)
@@ -483,7 +493,7 @@ pageReel2.Position = UDim2.fromScale(0.5, 0)
 pageReel2.BackgroundTransparency = 1
 pageReel2.Parent = pagesTrack
 
-local currentPageIndex = 0 -- 0 = Preferensi, 1 = Reel 2
+local currentPageIndex = 0
 
 local function snapToPage(idx: number)
 	currentPageIndex = math.clamp(idx, 0, 1)
@@ -501,13 +511,8 @@ local function snapToPage(idx: number)
 	end
 end
 
-tabPrefBtn.MouseButton1Click:Connect(function()
-	snapToPage(0)
-end)
-
-tabReel2Btn.MouseButton1Click:Connect(function()
-	snapToPage(1)
-end)
+tabPrefBtn.MouseButton1Click:Connect(function() snapToPage(0) end)
+tabReel2Btn.MouseButton1Click:Connect(function() snapToPage(1) end)
 
 local isMinimized = false
 minBtn.MouseButton1Click:Connect(function()
@@ -522,7 +527,6 @@ closeBtn.MouseButton1Click:Connect(function()
 	screenGui:Destroy()
 end)
 
--- Dragging support on Header (Mobile + PC)
 do
 	local dragging = false
 	local dragStart = Vector2.zero
@@ -533,12 +537,6 @@ do
 			dragging = true
 			dragStart = Vector2.new(input.Position.X, input.Position.Y)
 			startPos = mainFrame.Position
-		end
-	end)
-
-	header.InputEnded:Connect(function(input)
-		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
-			dragging = false
 		end
 	end)
 
@@ -677,7 +675,7 @@ local paramPillBtn = Instance.new("TextButton")
 paramPillBtn.Size = UDim2.fromOffset(262, 26)
 paramPillBtn.Position = UDim2.fromOffset(40, 150)
 paramPillBtn.BackgroundColor3 = Color3.fromRGB(28, 34, 46)
-paramPillBtn.Text = "Dimmer [0]"
+paramPillBtn.Text = "Dimmer [Ch.8]"
 paramPillBtn.TextColor3 = Color3.fromRGB(130, 215, 255)
 paramPillBtn.Font = Enum.Font.GothamBold
 paramPillBtn.TextSize = 11
@@ -829,7 +827,6 @@ detailPad.PaddingLeft = UDim.new(0, 8)
 detailPad.PaddingRight = UDim.new(0, 8)
 detailPad.PaddingBottom = UDim.new(0, 8)
 
---// Logic Helpers
 local function getActiveParamsForSelection(): { string }
 	local list = state.patchedByUniv[state.universe] or {}
 	local targetItem: PatchedItem? = nil
@@ -1003,12 +1000,12 @@ local function refreshGridAndLabels()
 
 	if #badgeParts == 0 then
 		addrBadge.Text = "U" .. tostring(state.universe) .. " • Kosong"
-		patchSummaryLabel.Text = "Patch: Belum ada fixture di Universe " .. tostring(state.universe)
-		patchDetailBox.Text = "Belum ada fixture di Universe " .. tostring(state.universe) .. ".\nKlik '+ Patch' di tab Preferensi."
+		patchSummaryLabel.Text = "Patch: Kosong (" .. remoteSrc .. ")"
+		patchDetailBox.Text = "Belum ada fixture di Universe " .. tostring(state.universe) .. ".\nRemote: " .. remoteSrc .. "\nKlik '+ Patch' di tab Preferensi."
 	else
 		addrBadge.Text = "U" .. tostring(state.universe) .. " • " .. table.concat(badgeParts, " ")
 		patchSummaryLabel.Text = "Patch: " .. table.concat(badgeParts, " | ")
-		patchDetailBox.Text = table.concat(detailLines, "\n")
+		patchDetailBox.Text = "Remote: " .. remoteSrc .. "\n" .. table.concat(detailLines, "\n")
 	end
 
 	syncParamAndFader()
@@ -1034,10 +1031,8 @@ local function clearCurrentUniverseFixtures()
 	refreshGridAndLabels()
 end
 
---// Fader Dragging (Mobile + PC)
 do
 	local sliding = false
-	local slideInput: InputObject? = nil
 
 	local function updateFromX(posX: number)
 		local absPos = faderTrack.AbsolutePosition.X
@@ -1049,26 +1044,23 @@ do
 	faderTrack.InputBegan:Connect(function(input)
 		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
 			sliding = true
-			slideInput = input
 			updateFromX(input.Position.X)
+		end
+	end)
 
-			input.Changed:Connect(function()
-				if input.UserInputState == Enum.UserInputState.End then
-					sliding = false
-					slideInput = nil
-				end
-			end)
+	UserInputService.InputEnded:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+			sliding = false
 		end
 	end)
 
 	UserInputService.InputChanged:Connect(function(input)
-		if sliding and input == slideInput then
+		if sliding and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
 			updateFromX(input.Position.X)
 		end
 	end)
 end
 
---// Button Connections
 devPrevBtn.MouseButton1Click:Connect(function()
 	state.addDeviceIdx = ((state.addDeviceIdx - 2) % #AVAILABLE_DEVICE_TYPES) + 1
 	refreshGridAndLabels()
@@ -1107,25 +1099,12 @@ local function stepParam(delta: number)
 	syncParamAndFader()
 end
 
-paramPrevBtn.MouseButton1Click:Connect(function()
-	stepParam(-1)
-end)
+paramPrevBtn.MouseButton1Click:Connect(function() stepParam(-1) end)
+paramNextBtn.MouseButton1Click:Connect(function() stepParam(1) end)
+paramPillBtn.MouseButton1Click:Connect(function() stepParam(1) end)
 
-paramNextBtn.MouseButton1Click:Connect(function()
-	stepParam(1)
-end)
-
-paramPillBtn.MouseButton1Click:Connect(function()
-	stepParam(1)
-end)
-
-zeroBtn.MouseButton1Click:Connect(function()
-	applyRatioToTargets(state.activeParam, 0)
-end)
-
-fullBtn.MouseButton1Click:Connect(function()
-	applyRatioToTargets(state.activeParam, 1)
-end)
+zeroBtn.MouseButton1Click:Connect(function() applyRatioToTargets(state.activeParam, 0) end)
+fullBtn.MouseButton1Click:Connect(function() applyRatioToTargets(state.activeParam, 1) end)
 
 selectAllBtn.MouseButton1Click:Connect(function()
 	local list = state.patchedByUniv[state.universe] or {}
@@ -1176,6 +1155,5 @@ clearAllBtn.MouseButton1Click:Connect(function()
 	clearCurrentUniverseFixtures()
 end)
 
--- Initial Setup
 snapToPage(0)
 refreshGridAndLabels()
