@@ -1,1385 +1,1102 @@
--- DmxConsoleUI_SnapSwipe_DynamicParams.lua
--- Desain & tema gelap tetap (350x340) + Snap Swipe ↕
--- Parameter di Preferensi otomatis ngikutin device yang dipilih (Wallwasher: Effect/Warna/SpeedEffect | Clara: Pan/Tilt/Gobo/Prism/dll.)
--- Auto-spill > 512 ke Universe 2 + Transport U1 (3-byte buffer) & U2 ({ [2] = buf512 }) -> UDP_DMXDATA
+--!strict
+-- DMX Controller UI (350x340) - Dynamic Fixture Mapping & Patch Info
+-- Supports: ClaraS14, Wallwasher_24X3W, StrobeBar_192_Segment, STROBE_1000W, Parled, Blinder
 
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local TweenService = game:GetService("TweenService")
 local UserInputService = game:GetService("UserInputService")
-local Workspace = game:GetService("Workspace")
+local TweenService = game:GetService("TweenService")
+local RunService = game:GetService("RunService")
 
-local player = Players.LocalPlayer or Players.PlayerAdded:Wait()
+local player = Players.LocalPlayer
+local playerGui = player:WaitForChild("PlayerGui")
+
 local MAX_CHANNELS = 512
-local DEFAULT_MAX_UNIVERSES = 2
-local REMOTE_NAME = "UDP_DMXDATA"
+local MIN_VALUE = 0
+local MAX_VALUE = 255
 local SEND_THROTTLE = 0.04
 
--- ============================================================================
--- PATCH ENGINE
--- ============================================================================
-local PatchEngine = {}
-do
-	local mod = ReplicatedStorage:FindFirstChild("PatchEngine")
-	if mod and mod:IsA("ModuleScript") then
-		local ok, res = pcall(require, mod)
-		if ok and type(res) == "table" and type(res.PatchAll) == "function" then
-			PatchEngine = res
+--// Remote Event Resolver
+local function resolveRemote(): RemoteEvent?
+	local remotesFolder = ReplicatedStorage:FindFirstChild("Remotes")
+	if remotesFolder then
+		local udp = remotesFolder:FindFirstChild("UDP_DMXDATA")
+		if udp and udp:IsA("RemoteEvent") then
+			return udp
 		end
 	end
+	local direct = ReplicatedStorage:FindFirstChild("UDP_DMXDATA")
+	if direct and direct:IsA("RemoteEvent") then
+		return direct
+	end
+	for _, obj in ipairs(ReplicatedStorage:GetDescendants()) do
+		if obj:IsA("RemoteEvent") and obj.Name == "UDP_DMXDATA" then
+			return obj
+		end
+	end
+	return nil
 end
 
-if not PatchEngine.Profiles then
-	local BarWashProfile = {
-		Group = "BarWash", Span = 8, Dimmer = 0, Shutter = 1, Red = 2, Green = 3, Blue = 4, Effect = 5, Speed = 7,
-	}
-	local ClaraS14Profile = {
-		Group = "MovingBeam",
+local udpRemote = resolveRemote()
+
+--// Fixture Profiles & Parameter Order
+local BarWashProfile = {
+	Group = "BarWash",
+	Span = 8,
+	Dimmer = 0,
+	Shutter = 1,
+	Red = 2,
+	Green = 3,
+	Blue = 4,
+	Effect = 5,
+	Effect2 = 6,
+	Speed = 7,
+}
+
+local DEVICE_PROFILES: { [string]: { [string]: any } } = {
+	["ClaraS14"] = {
+		Group = "MovingHead",
 		Span = 16,
-		X = 0,
-		Y = 1,
-		PanFine = 2,
-		TiltFine = 3,
+		Pan = 0,
+		Tilt = 1,
+		Dimmer = 5,
 		Shutter = 6,
-		Dimmer = 7,
-		Color = 8,
-		Gobo = 9,
-		Prism = 11,
-		Effect = 11,
-		Focus = 12,
-		Speed = 14,
-		GoboRotation = 14,
-	}
-	PatchEngine.Profiles = {
-		["ClaraS14"] = ClaraS14Profile,
-		["Wallwasher_24X3W"] = BarWashProfile,
-		["StrobeBar_192_Segment"] = BarWashProfile,
-		["STROBE_1000W"] = { Group = "Strobe1000W", Span = 8, Dimmer = 0, Shutter = 1, Red = 2, Green = 3, Blue = 4, Effect = 5, Speed = 7 },
-		["Parled"] = { Group = "Parled", Span = 6, Dimmer = 0, Red = 1, Green = 2, Blue = 3, White = 4, Shutter = 5 },
-		["BlinderRing_2x50W"] = { Group = "Blinder", Span = 12, Dimmer = 0, Shutter = 1, Pod1Mode = 2, Pod2Mode = 3, AmberDim = 4, BacklightDim = 5, RingDim = 6, Red = 7, Green = 8, Blue = 9, Effect = 10, Speed = 11 },
-		["Blinder"] = { Group = "Blinder", Span = 8, Dimmer = 0, LED1 = 0, LED2 = 1, LED3 = 2, LED4 = 3 },
-		["Fogger"] = { Group = "Fogger", Span = 16, X = 0, Dimmer = 2, Shutter = 4, Red = 5, Green = 8, Blue = 9, Effect = 12 },
-		["Flower"] = { Group = "Flower", Span = 18, Dimmer = 0, Red = 1, Green = 2, Blue = 3, Effect = 4, Speed = 5, Shutter = 16 },
-		["Miniled"] = { Group = "MiniLed", Span = 1, Dimmer = 0 },
-		["Pixelbeambar"] = { Group = "PixelBar", Span = 20, Y = 0, Speed = 2, Effect = 3, Dimmer = 5, Shutter = 6, Red = 8, Green = 9, Blue = 10 },
-		["Retrohex"] = { Group = "RetroHex", Span = 11, Dimmer = 0, Shutter = 3, Effect = 4, Red = 6, Green = 7, Blue = 8 },
-		["Windmill"] = { Group = "Windmill", Span = 8, Dimmer = 0, Shutter = 1, Speed = 2, Effect = 3, Red = 5, Green = 6, Blue = 7 },
-	}
-end
-
--- Urutan & label parameter per jenis fixture biar tampilannya natural & ringkas
-local PARAM_META = {
-	X = { label = "Pan", maxDeg = 540 },
-	Y = { label = "Tilt", maxDeg = 270 },
-	PanFine = { label = "PanFine" },
-	TiltFine = { label = "TiltFine" },
-	Dimmer = { label = "Dimmer" },
-	Shutter = { label = "Shutter" },
-	Red = { label = "Warna R" },
-	Green = { label = "Warna G" },
-	Blue = { label = "Warna B" },
-	White = { label = "Warna W" },
-	Color = { label = "Warna" },
-	Gobo = { label = "Gobo" },
-	Prism = { label = "Prisma" },
-	Effect = { label = "Effect" },
-	Focus = { label = "Focus" },
-	Speed = { label = "SpeedEffect" },
-	GoboRotation = { label = "GoboRot" },
+		Color = 7,
+		Gobo = 8,
+		Prism = 9,
+		Focus = 10,
+		Speed = 11,
+	},
+	["Wallwasher_24X3W"] = BarWashProfile,
+	["StrobeBar_192_Segment"] = BarWashProfile,
+	["STROBE_1000W"] = {
+		Group = "Strobe1000W",
+		Span = 8,
+		Dimmer = 0,
+		Effect = 5,
+		Effect2 = 6,
+		Speed = 7,
+	},
+	["Parled"] = {
+		Group = "Parled",
+		Span = 6,
+		Dimmer = 0,
+		Red = 1,
+		Green = 2,
+		Blue = 3,
+		White = 4,
+		Shutter = 5,
+	},
+	["Blinder"] = {
+		Group = "Blinder",
+		Span = 8,
+		Dimmer = 0,
+		Red = 1,
+		Green = 2,
+		Blue = 3,
+		Shutter = 4,
+		Effect = 5,
+		Speed = 7,
+	},
 }
 
-local DEVICE_PARAM_ORDER = {
-	["ClaraS14"] = { "X", "Y", "Gobo", "Prism", "Color", "Dimmer", "Shutter", "Focus", "Speed", "PanFine", "TiltFine" },
-	["Wallwasher_24X3W"] = { "Effect", "Red", "Green", "Blue", "Speed", "Dimmer", "Shutter" },
-	["StrobeBar_192_Segment"] = { "Effect", "Red", "Green", "Blue", "Speed", "Dimmer", "Shutter" },
-	["STROBE_1000W"] = { "Dimmer", "Shutter", "Red", "Green", "Blue", "Effect", "Speed" },
-	["Parled"] = { "Red", "Green", "Blue", "White", "Dimmer", "Shutter" },
-	["BlinderRing_2x50W"] = { "Dimmer", "Shutter", "Red", "Green", "Blue", "Effect", "Speed" },
-	["Fogger"] = { "X", "Dimmer", "Shutter", "Red", "Green", "Blue", "Effect" },
-	["Pixelbeambar"] = { "Y", "Effect", "Red", "Green", "Blue", "Speed", "Dimmer", "Shutter" },
+local DEVICE_PARAM_ORDER: { [string]: { string } } = {
+	["ClaraS14"] = { "Dimmer", "Pan", "Tilt", "Color", "Gobo", "Prism", "Focus", "Shutter", "Speed" },
+	["Wallwasher_24X3W"] = { "Dimmer", "Shutter", "Red", "Green", "Blue", "Effect", "Effect2", "Speed" },
+	["StrobeBar_192_Segment"] = { "Dimmer", "Shutter", "Red", "Green", "Blue", "Effect", "Effect2", "Speed" },
+	["STROBE_1000W"] = { "Dimmer", "Effect", "Effect2", "Speed" },
+	["Parled"] = { "Dimmer", "Red", "Green", "Blue", "White", "Shutter" },
+	["Blinder"] = { "Dimmer", "Red", "Green", "Blue", "Shutter", "Effect", "Speed" },
 }
 
-local NameAliases = {
-	["ClaraS14"] = { "claras14", "clara_s14", "clara s14" },
-	["STROBE_1000W"] = { "strobe_1000w", "strobe1000", "strobo_1000w", "strobe 1000w" },
-	["Wallwasher_24X3W"] = { "wallwasher_24x3w", "wallwasher", "wall washer" },
-	["StrobeBar_192_Segment"] = { "strobebar_192_segment", "strobebar", "strobe bar" },
-	["BlinderRing_2x50W"] = { "blinderring_2x50w", "blinderring", "blinder ring" },
-	["Pixelbeambar"] = { "pixelbeambar", "pixelbar", "pixel beam bar" },
+local PARAM_META: { [string]: { label: string, kind: string } } = {
+	Dimmer = { label = "Dimmer", kind = "percent" },
+	Shutter = { label = "Strobe", kind = "dmx" },
+	Red = { label = "Warna R", kind = "dmx" },
+	Green = { label = "Warna G", kind = "dmx" },
+	Blue = { label = "Warna B", kind = "dmx" },
+	White = { label = "Warna W", kind = "dmx" },
+	Effect = { label = "Effect", kind = "dmx" },
+	Effect2 = { label = "Effect2", kind = "dmx" },
+	Speed = { label = "SpeedEffect", kind = "dmx" },
+	Pan = { label = "Pan", kind = "pan" },
+	Tilt = { label = "Tilt", kind = "tilt" },
+	Color = { label = "Color", kind = "dmx" },
+	Gobo = { label = "Gobo", kind = "dmx" },
+	Prism = { label = "Prism", kind = "dmx" },
+	Focus = { label = "Focus", kind = "dmx" },
 }
 
-local function matchesAnyKey(itemName, keys)
-	local lowerName = string.lower(tostring(itemName or ""))
-	for _, k in ipairs(keys) do
-		local keyLower = string.lower(tostring(k or ""))
-		if keyLower ~= "" and (lowerName == keyLower or string.find(lowerName, keyLower, 1, true)) then
-			return true
-		end
-	end
-	return false
+local AVAILABLE_DEVICE_TYPES = {
+	"ClaraS14",
+	"Wallwasher_24X3W",
+	"StrobeBar_192_Segment",
+	"STROBE_1000W",
+	"Parled",
+	"Blinder",
+}
+
+local function getShortTag(devType: string): string
+	local s = string.lower(devType)
+	if string.find(s, "clara", 1, true) then return "CL" end
+	if string.find(s, "wallwasher", 1, true) then return "WW" end
+	if string.find(s, "strobebar", 1, true) then return "SB" end
+	if string.find(s, "strobe", 1, true) then return "ST" end
+	if string.find(s, "parled", 1, true) then return "PL" end
+	if string.find(s, "blinder", 1, true) then return "BL" end
+	return string.upper(string.sub(devType, 1, 2))
 end
 
-local function toAbsChannel(address, offset0, maxChannels)
-	if type(address) ~= "number" or type(offset0) ~= "number" then return nil end
-	if offset0 < 0 or offset0 >= (maxChannels or MAX_CHANNELS) then return nil end
-	local ch = math.floor(address + offset0)
-	return (ch >= 1 and ch <= MAX_CHANNELS) and ch or nil
-end
-
--- ============================================================================
--- TRANSPORT: U1 (3-BYTE BUFFER) & U2 ({ [2] = buf512 }) -> UDP_DMXDATA
--- ============================================================================
-local function getOwnCarModel(plr)
-	local vehicles = Workspace:FindFirstChild("Vehicles")
-	if not vehicles or not plr then return nil end
-	local exact = vehicles:FindFirstChild(plr.Name .. "'s Car")
-	if exact then return exact end
-	local lp = string.lower(plr.Name)
-	for _, c in ipairs(vehicles:GetChildren()) do
-		if string.find(string.lower(c.Name), lp, 1, true) then
-			return c
-		end
-	end
-	return nil
-end
-
-local function findUdpDmxRemote(plr)
-	local carModel = getOwnCarModel(plr)
-	if carModel then
-		local r = carModel:FindFirstChild(REMOTE_NAME, true)
-		if r and (r:IsA("RemoteEvent") or r:IsA("UnreliableRemoteEvent")) then
-			return r
-		end
-	end
-	local rRs = ReplicatedStorage:FindFirstChild(REMOTE_NAME, true)
-	if rRs and (rRs:IsA("RemoteEvent") or rRs:IsA("UnreliableRemoteEvent")) then
-		return rRs
-	end
-	local rWs = Workspace:FindFirstChild(REMOTE_NAME, true)
-	if rWs and (rWs:IsA("RemoteEvent") or rWs:IsA("UnreliableRemoteEvent")) then
-		return rWs
-	end
-	return nil
-end
-
-local DmxTransport = {}
-DmxTransport.__index = DmxTransport
-
-function DmxTransport.new(plr)
-	local self = setmetatable({}, DmxTransport)
-	self.Player = plr
-	self.DataRemote = findUdpDmxRemote(plr)
-	self.LastValues = { [1] = {}, [2] = {} }
-	self.UniverseBuffers = {
-		[2] = buffer.create(MAX_CHANNELS),
+local function getProfile(devType: string): { [string]: any }
+	return DEVICE_PROFILES[devType] or {
+		Group = "Generic",
+		Span = 8,
+		Dimmer = 0,
 	}
-	self.LastSendTick = {}
-	self.TxCount = 0
-	self:_bind()
-	return self
 end
 
-function DmxTransport:_refreshRemote()
-	local found = findUdpDmxRemote(self.Player)
-	if found then
-		self.DataRemote = found
+local function getParamListForDevice(devType: string): { string }
+	local custom = DEVICE_PARAM_ORDER[devType]
+	if custom then
+		return custom
 	end
-	return self.DataRemote
-end
-
-function DmxTransport:_bind()
-	local vehicles = Workspace:FindFirstChild("Vehicles")
-	if vehicles then
-		vehicles.ChildAdded:Connect(function()
-			task.wait(0.25)
-			self:_refreshRemote()
-		end)
-	end
-	task.spawn(function()
-		while not self.DataRemote do
-			self:_refreshRemote()
-			task.wait(1)
+	local prof = getProfile(devType)
+	local out = {}
+	for key, val in pairs(prof) do
+		if key ~= "Group" and key ~= "Span" and type(val) == "number" then
+			table.insert(out, key)
 		end
+	end
+	table.sort(out, function(a, b)
+		return prof[a] < prof[b]
 	end)
+	return out
 end
 
-function DmxTransport:SendChannel(univ, ch, dmxVal, force)
-	local u = (tonumber(univ) == 2) and 2 or 1
-	local channel = math.clamp(math.floor(tonumber(ch) or 1), 1, MAX_CHANNELS)
-	local val = math.clamp(math.floor(tonumber(dmxVal) or 0), 0, 255)
-
-	self.LastValues[u] = self.LastValues[u] or {}
-	if not force and self.LastValues[u][channel] == val then
-		return true
-	end
-
-	local key = u .. ":" .. channel
-	local now = os.clock()
-	if not force and self.LastSendTick[key] and (now - self.LastSendTick[key]) < SEND_THROTTLE then
-		return true
-	end
-
-	local remote = self.DataRemote or self:_refreshRemote()
-	if not remote then
-		return false
-	end
-
-	self.LastValues[u][channel] = val
-	self.LastSendTick[key] = now
-
-	local ok = false
-	if u == 2 then
-		local buf512 = self.UniverseBuffers[2]
-		if not buf512 then
-			buf512 = buffer.create(MAX_CHANNELS)
-			self.UniverseBuffers[2] = buf512
-		end
-		buffer.writeu8(buf512, channel - 1, val)
-		ok = pcall(function()
-			remote:FireServer({ [2] = buf512 })
-		end)
-	else
-		local buf3 = buffer.create(3)
-		buffer.writeu16(buf3, 0, channel)
-		buffer.writeu8(buf3, 2, val)
-		ok = pcall(function()
-			remote:FireServer(buf3)
-		end)
-	end
-
-	if ok then
-		self.TxCount += 1
-	end
-	return ok
-end
-
-function DmxTransport:ClearUniverse(univ)
-	local u = (tonumber(univ) == 2) and 2 or 1
-	self.LastValues[u] = {}
-	if u == 2 then
-		local buf512 = buffer.create(MAX_CHANNELS)
-		self.UniverseBuffers[2] = buf512
-		local remote = self.DataRemote or self:_refreshRemote()
-		if remote then
-			pcall(function()
-				remote:FireServer({ [2] = buf512 })
-			end)
-			self.TxCount += 1
-		end
-	end
-end
-
-local transport = DmxTransport.new(player)
-
--- ============================================================================
--- DARK THEME UI (350x340 - UKURAN NORMAL + TIKTOK/SHORTS SNAP SWIPE)
--- ============================================================================
-local THEME = {
-	bg = Color3.fromRGB(24, 25, 29),
-	surface = Color3.fromRGB(38, 40, 46),
-	surfaceAlt = Color3.fromRGB(48, 51, 58),
-	stroke = Color3.fromRGB(58, 62, 70),
-	divider = Color3.fromRGB(46, 49, 56),
-	accent = Color3.fromRGB(11, 136, 153),
-	primary = Color3.fromRGB(33, 134, 235),
-	text = Color3.fromRGB(236, 238, 244),
-	muted = Color3.fromRGB(154, 160, 172),
-	track = Color3.fromRGB(64, 68, 76),
-	badgeBg = Color3.fromRGB(44, 47, 54),
+--// Patch & Universe State
+type PatchedItem = {
+	Index: number,
+	Type: string,
+	Address: number,
+	EndAddress: number,
+	Profile: { [string]: any },
 }
-
-local WIN_W, WIN_H = 350, 340
-
-local parentTarget = player:WaitForChild("PlayerGui")
-pcall(function()
-	if gethui then parentTarget = gethui() end
-end)
-local oldGui = parentTarget:FindFirstChild("DmxConsoleSnapGui")
-if oldGui then oldGui:Destroy() end
-
-local fixtureNames = {}
-do
-	local seen = {}
-	for name, prof in pairs(PatchEngine.Profiles or {}) do
-		if type(prof) == "table" and not seen[prof] then
-			seen[prof] = true
-			table.insert(fixtureNames, name)
-		end
-	end
-	table.sort(fixtureNames, function(a, b)
-		if a == "ClaraS14" then return true end
-		if b == "ClaraS14" then return false end
-		return a < b
-	end)
-end
-
-local allRawFixtures = {}
 
 local state = {
-	activeTab = "patch",
-	page = 1,
-	slotsPerPage = 12,
 	universe = 1,
-	fixtureIndex = 1,
-	addedCountByUniv = { [1] = 0, [2] = 0 },
-	selectedBoxes = {},
-	activeParamKey = "X",
-	paramRatios = {},
-	rawByUniv = { [1] = {}, [2] = {} },
-	patchedByUniv = { [1] = {}, [2] = {} },
-	nextAddress = 1,
-	devicesPowerOn = false,
-	reelIndex = 1,
+	addDeviceIdx = 1,
+	patchedByUniv = {} :: { [number]: { PatchedItem } },
+	selectedIndices = {} :: { [number]: boolean },
+	activeBoxIndex = nil :: number?,
+	activeParam = "Dimmer",
+	paramRatios = {
+		Dimmer = 0,
+		Shutter = 0,
+		Red = 0,
+		Green = 0,
+		Blue = 0,
+		White = 0,
+		Effect = 0,
+		Effect2 = 0,
+		Speed = 0,
+		Pan = 0.5,
+		Tilt = 0.5,
+		Color = 0,
+		Gobo = 0,
+		Prism = 0,
+		Focus = 0,
+	} :: { [string]: number },
+	univBuffers = {} :: { [number]: buffer },
+	lastSendTime = {} :: { [string]: number },
+	lastSentVal = {} :: { [string]: number },
 }
 
-local addrBadge
-
-local function getSelectedFixtureName()
-	return fixtureNames[state.fixtureIndex] or "ClaraS14"
+local function ensureUniverse(univ: number)
+	if not state.patchedByUniv[univ] then
+		state.patchedByUniv[univ] = {}
+	end
+	if not state.univBuffers[univ] then
+		state.univBuffers[univ] = buffer.create(MAX_CHANNELS)
+	end
 end
 
-local function getSelectedBoxList()
-	local list = {}
-	for idx, isSel in pairs(state.selectedBoxes) do
-		if isSel then
-			table.insert(list, idx)
-		end
-	end
-	table.sort(list)
-	return list
-end
-
-local function buildChannelsFromProfile(addr, span, prof)
-	return {
-		X = toAbsChannel(addr, prof.X, span),
-		Y = toAbsChannel(addr, prof.Y, span),
-		PanFine = toAbsChannel(addr, prof.PanFine, span),
-		TiltFine = toAbsChannel(addr, prof.TiltFine, span),
-		Shutter = toAbsChannel(addr, prof.Shutter, span),
-		Dimmer = toAbsChannel(addr, prof.Dimmer, span),
-		Color = toAbsChannel(addr, prof.Color, span),
-		Gobo = toAbsChannel(addr, prof.Gobo, span),
-		Prism = toAbsChannel(addr, prof.Prism, span),
-		Effect = toAbsChannel(addr, prof.Effect, span),
-		Focus = toAbsChannel(addr, prof.Focus, span),
-		Speed = toAbsChannel(addr, prof.Speed or prof.GoboRotation, span),
-		GoboRotation = toAbsChannel(addr, prof.GoboRotation or prof.Speed, span),
-		Red = toAbsChannel(addr, prof.Red, span),
-		Green = toAbsChannel(addr, prof.Green, span),
-		Blue = toAbsChannel(addr, prof.Blue, span),
-		White = toAbsChannel(addr, prof.White, span),
-	}
-end
-
-local function resolveFixtureForBox(boxIdx)
-	local patched = state.patchedByUniv[state.universe] or {}
-	if patched[boxIdx] then
-		return patched[boxIdx]
-	end
-	local profName = getSelectedFixtureName()
-	local prof = PatchEngine.Profiles[profName] or {}
-	local span = math.clamp(math.floor(tonumber(prof.Span) or 8), 1, MAX_CHANNELS)
-	local fallbackAddr = math.clamp((boxIdx - 1) * span + 1, 1, MAX_CHANNELS)
-	return {
-		Address = fallbackAddr,
-		Span = span,
-		Universe = state.universe,
-		Type = profName,
-		Channels = buildChannelsFromProfile(fallbackAddr, span, prof),
-	}
-end
-
-local function getActiveDeviceType()
-	local selList = getSelectedBoxList()
-	if #selList > 0 then
-		local firstFix = resolveFixtureForBox(selList[1])
-		if firstFix and firstFix.Type then
-			return firstFix.Type
-		end
-	end
-	return getSelectedFixtureName()
-end
-
-local function getAvailableParamsForDevice(devType)
-	local prof = PatchEngine.Profiles[devType] or {}
-	local available = {}
-	local seen = {}
-
-	local preferredOrder = DEVICE_PARAM_ORDER[devType] or {}
-	for _, key in ipairs(preferredOrder) do
-		if type(prof[key]) == "number" and not seen[key] then
-			seen[key] = true
-			table.insert(available, key)
-		end
-	end
-
-	for key, val in pairs(prof) do
-		if type(val) == "number" and key ~= "Span" and not seen[key] then
-			seen[key] = true
-			table.insert(available, key)
-		end
-	end
-
-	if #available == 0 then
-		table.insert(available, "X")
-		table.insert(available, "Y")
-	end
-
-	return available
-end
-
-local function ensureValidActiveParam()
-	local devType = getActiveDeviceType()
-	local params = getAvailableParamsForDevice(devType)
-	for _, k in ipairs(params) do
-		if k == state.activeParamKey then
-			return params
-		end
-	end
-	state.activeParamKey = params[1]
-	return params
-end
-
-local function getTargetFixtures()
-	local selList = getSelectedBoxList()
-	local list = {}
-	if #selList > 0 then
-		for _, boxIdx in ipairs(selList) do
-			table.insert(list, resolveFixtureForBox(boxIdx))
-		end
-	else
-		local total = state.addedCountByUniv[state.universe] or 0
-		for idx = 1, total do
-			table.insert(list, resolveFixtureForBox(idx))
-		end
-	end
-	return list
-end
-
-local function updateBadge()
-	if not addrBadge then return end
-	local selList = getSelectedBoxList()
-	local addrs = {}
-	for _, boxIdx in ipairs(selList) do
-		table.insert(addrs, tostring(resolveFixtureForBox(boxIdx).Address))
-	end
-	local tag = (#addrs > 0) and table.concat(addrs, ",") or tostring(state.nextAddress)
-	local conn = transport.DataRemote and "OK" or ".."
-	addrBadge.Text = "U" .. state.universe .. "•A[" .. tag .. "] " .. conn .. " TX:" .. transport.TxCount
-end
-
-local function setDevicesPower(isOn)
-	state.devicesPowerOn = (isOn == true)
-	local powerVal = state.devicesPowerOn and 255 or 0
-	local targets = getTargetFixtures()
-	local u = state.universe
-
-	for _, fix in ipairs(targets) do
-		if fix and fix.Channels then
-			local ch = fix.Channels
-			local hasDimmer = type(ch.Dimmer) == "number"
-			local hasShutter = type(ch.Shutter) == "number"
-
-			if hasDimmer then
-				transport:SendChannel(u, ch.Dimmer, powerVal, true)
-			end
-			if hasShutter then
-				transport:SendChannel(u, ch.Shutter, 0, true)
-			end
-			if not hasDimmer and not hasShutter and fix.Address then
-				transport:SendChannel(u, fix.Address, powerVal, true)
-			end
-		end
-	end
-
-	updateBadge()
-end
-
-local function applyParamToSelected(paramKey, dmxVal)
-	local clamped = math.clamp(math.floor(dmxVal), 0, 255)
-	local u = state.universe
-	local seen = {}
-
-	for boxIdx, isSel in pairs(state.selectedBoxes) do
-		if isSel then
-			local fix = resolveFixtureForBox(boxIdx)
-			local targetCh = fix.Channels and fix.Channels[paramKey]
-			if targetCh and not seen[targetCh] then
-				seen[targetCh] = true
-				transport:SendChannel(u, targetCh, clamped, false)
-			end
-		end
-	end
-
-	updateBadge()
-end
+ensureUniverse(1)
+ensureUniverse(2)
 
 local function rebuildAllUniverses()
-	for u = 1, DEFAULT_MAX_UNIVERSES do
-		state.rawByUniv[u] = {}
-		state.patchedByUniv[u] = {}
-		state.addedCountByUniv[u] = 0
-	end
-
-	local cursors = { [1] = 1, [2] = 1 }
-
-	for _, fix in ipairs(allRawFixtures) do
-		local prof = PatchEngine.Profiles[fix.Type] or {}
-		local span = math.clamp(math.floor(tonumber(prof.Span) or 8), 1, MAX_CHANNELS)
-		local targetUniv = (tonumber(fix.Universe) == 2) and 2 or 1
-
-		-- Aturan generik: kalau di Universe 1 melebihi 512 channel, otomatis lompat ke Universe 2
-		if targetUniv == 1 and (cursors[1] + span - 1 > MAX_CHANNELS) then
-			targetUniv = 2
-		end
-
-		if cursors[targetUniv] + span - 1 <= MAX_CHANNELS then
-			local addr = cursors[targetUniv]
-			cursors[targetUniv] = addr + span
-			fix.Universe = targetUniv
-			fix.Address = addr
-
-			table.insert(state.rawByUniv[targetUniv], fix)
-			table.insert(state.patchedByUniv[targetUniv], {
-				Address = addr,
-				EndAddress = addr + span - 1,
-				Span = span,
-				Universe = targetUniv,
-				Type = fix.Type,
-				Channels = buildChannelsFromProfile(addr, span, prof),
-			})
-			state.addedCountByUniv[targetUniv] += 1
+	for univ, buf in pairs(state.univBuffers) do
+		buffer.fill(buf, 0, 0, MAX_CHANNELS)
+		local list = state.patchedByUniv[univ] or {}
+		for _, item in ipairs(list) do
+			local prof = item.Profile
+			for key, offset in pairs(prof) do
+				if key ~= "Group" and key ~= "Span" and type(offset) == "number" then
+					local ch = item.Address + offset
+					if ch >= 1 and ch <= MAX_CHANNELS then
+						local ratio = state.paramRatios[key] or 0
+						local val = math.clamp(math.floor(ratio * MAX_VALUE + 0.5), MIN_VALUE, MAX_VALUE)
+						buffer.writeu8(buf, ch - 1, val)
+					end
+				end
+			end
 		end
 	end
+end
 
-	local curU = state.universe
-	local curPatched = state.patchedByUniv[curU] or {}
-	local highestEnd = 0
-	for _, item in ipairs(curPatched) do
-		if (item.EndAddress or 0) > highestEnd then
-			highestEnd = item.EndAddress
-		end
+local function patchDevice(devType: string)
+	local prof = getProfile(devType)
+	local span: number = prof.Span or 8
+	local targetUniv = state.universe
+	ensureUniverse(targetUniv)
+
+	local list = state.patchedByUniv[targetUniv]
+	local startAddr = 1
+	if #list > 0 then
+		startAddr = list[#list].EndAddress + 1
 	end
-	state.nextAddress = math.clamp(highestEnd + 1, 1, MAX_CHANNELS)
+	local endAddr = startAddr + span - 1
+
+	if endAddr > MAX_CHANNELS then
+		targetUniv = targetUniv + 1
+		ensureUniverse(targetUniv)
+		list = state.patchedByUniv[targetUniv]
+		startAddr = (#list > 0) and (list[#list].EndAddress + 1) or 1
+		endAddr = startAddr + span - 1
+	end
+
+	local item: PatchedItem = {
+		Index = #list + 1,
+		Type = devType,
+		Address = startAddr,
+		EndAddress = endAddr,
+		Profile = prof,
+	}
+	table.insert(list, item)
+	state.universe = targetUniv
+	state.selectedIndices = { [item.Index] = true }
+	state.activeBoxIndex = item.Index
+	rebuildAllUniverses()
+end
+
+local function sendChannelValue(univ: number, channel: number, rawVal: number)
+	if channel < 1 or channel > MAX_CHANNELS then
+		return
+	end
+	local val = math.clamp(math.floor(rawVal + 0.5), MIN_VALUE, MAX_VALUE)
+	ensureUniverse(univ)
+	buffer.writeu8(state.univBuffers[univ], channel - 1, val)
+
+	local key = tostring(univ) .. ":" .. tostring(channel)
+	local now = os.clock()
+	local lastT = state.lastSendTime[key] or 0
+	local lastV = state.lastSentVal[key]
+
+	if lastV == val then
+		return
+	end
+	if (now - lastT) < SEND_THROTTLE then
+		return
+	end
+
+	state.lastSendTime[key] = now
+	state.lastSentVal[key] = val
+
+	if udpRemote then
+		pcall(function()
+			udpRemote:FireServer(univ, channel, val)
+		end)
+	end
+end
+
+--// UI Construction (350x340)
+local existingGui = playerGui:FindFirstChild("DMXController350x340")
+if existingGui then
+	existingGui:Destroy()
 end
 
 local screenGui = Instance.new("ScreenGui")
-screenGui.Name = "DmxConsoleSnapGui"
+screenGui.Name = "DMXController350x340"
 screenGui.ResetOnSpawn = false
-screenGui.IgnoreGuiInset = true
 screenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
-screenGui.DisplayOrder = 999
-screenGui.Parent = parentTarget
+screenGui.Parent = playerGui
 
 local mainFrame = Instance.new("Frame")
-mainFrame.Name = "MainWindow"
-mainFrame.Size = UDim2.fromOffset(WIN_W, WIN_H)
-mainFrame.Position = UDim2.new(0.5, -math.floor(WIN_W / 2), 0.5, -math.floor(WIN_H / 2))
-mainFrame.BackgroundColor3 = THEME.bg
+mainFrame.Name = "MainFrame"
+mainFrame.Size = UDim2.fromOffset(350, 340)
+mainFrame.Position = UDim2.new(0.5, -175, 0.5, -170)
+mainFrame.BackgroundColor3 = Color3.fromRGB(16, 19, 26)
 mainFrame.BorderSizePixel = 0
 mainFrame.Active = true
 mainFrame.Parent = screenGui
-Instance.new("UICorner", mainFrame).CornerRadius = UDim.new(0, 16)
-local mainStroke = Instance.new("UIStroke", mainFrame)
-mainStroke.Color = THEME.stroke
-mainStroke.Thickness = 1.2
 
--- Top Bar
-local topBar = Instance.new("Frame")
-topBar.Size = UDim2.new(1, 0, 0, 38)
-topBar.BackgroundTransparency = 1
-topBar.Active = true
-topBar.Parent = mainFrame
+local mainCorner = Instance.new("UICorner")
+mainCorner.CornerRadius = UDim.new(0, 10)
+mainCorner.Parent = mainFrame
 
+local mainStroke = Instance.new("UIStroke")
+mainStroke.Color = Color3.fromRGB(45, 55, 75)
+mainStroke.Thickness = 1
+mainStroke.Parent = mainFrame
+
+-- Header Bar
+local header = Instance.new("Frame")
+header.Size = UDim2.new(1, 0, 0, 34)
+header.BackgroundColor3 = Color3.fromRGB(23, 28, 38)
+header.BorderSizePixel = 0
+header.Parent = mainFrame
+
+local headerCorner = Instance.new("UICorner")
+headerCorner.CornerRadius = UDim.new(0, 10)
+headerCorner.Parent = header
+
+local titleLabel = Instance.new("TextLabel")
+titleLabel.Size = UDim2.new(0, 150, 1, 0)
+titleLabel.Position = UDim2.fromOffset(10, 0)
+titleLabel.BackgroundTransparency = 1
+titleLabel.Text = "DMX 512 • 350x340"
+titleLabel.TextColor3 = Color3.fromRGB(235, 240, 250)
+titleLabel.Font = Enum.Font.GothamBold
+titleLabel.TextSize = 12
+titleLabel.TextXAlignment = Enum.TextXAlignment.Left
+titleLabel.Parent = header
+
+local addrBadge = Instance.new("TextLabel")
+addrBadge.Name = "AddrBadge"
+addrBadge.Size = UDim2.new(0, 180, 1, 0)
+addrBadge.Position = UDim2.fromOffset(160, 0)
+addrBadge.BackgroundTransparency = 1
+addrBadge.Text = "U1 • Kosong"
+addrBadge.TextColor3 = Color3.fromRGB(120, 200, 255)
+addrBadge.Font = Enum.Font.GothamMedium
+addrBadge.TextSize = 10
+addrBadge.TextTruncate = Enum.TextTruncate.AtEnd
+addrBadge.TextXAlignment = Enum.TextXAlignment.Right
+addrBadge.Parent = header
+
+-- Dragging support on Header
 do
 	local dragging = false
-	local dragInput = nil
 	local dragStart = Vector2.zero
 	local startPos = UDim2.new()
 
-	topBar.InputBegan:Connect(function(input)
-		if input.UserInputType == Enum.UserInputType.Touch or input.UserInputType == Enum.UserInputType.MouseButton1 then
+	header.InputBegan:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
 			dragging = true
 			dragStart = Vector2.new(input.Position.X, input.Position.Y)
 			startPos = mainFrame.Position
-			dragInput = input
 		end
 	end)
 
-	topBar.InputChanged:Connect(function(input)
-		if input.UserInputType == Enum.UserInputType.Touch or input.UserInputType == Enum.UserInputType.MouseMovement then
-			dragInput = input
-		end
-	end)
-
-	UserInputService.InputEnded:Connect(function(input)
-		if input == dragInput or input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+	header.InputEnded:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
 			dragging = false
 		end
 	end)
 
 	UserInputService.InputChanged:Connect(function(input)
-		if dragging and (input == dragInput or input.UserInputType == Enum.UserInputType.Touch or input.UserInputType == Enum.UserInputType.MouseMovement) then
+		if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType.Touch) then
 			local delta = Vector2.new(input.Position.X, input.Position.Y) - dragStart
 			mainFrame.Position = UDim2.new(
-				startPos.X.Scale, startPos.X.Offset + delta.X,
-				startPos.Y.Scale, startPos.Y.Offset + delta.Y
+				startPos.X.Scale,
+				startPos.X.Offset + delta.X,
+				startPos.Y.Scale,
+				startPos.Y.Offset + delta.Y
 			)
 		end
 	end)
 end
 
-local reelIndicator = Instance.new("TextLabel")
-reelIndicator.Size = UDim2.fromOffset(140, 24)
-reelIndicator.Position = UDim2.fromOffset(14, 7)
-reelIndicator.BackgroundTransparency = 1
-reelIndicator.Text = "REEL 1/2 • SWIPE ↕"
-reelIndicator.TextXAlignment = Enum.TextXAlignment.Left
-reelIndicator.TextColor3 = THEME.muted
-reelIndicator.TextSize = 11
-reelIndicator.Font = Enum.Font.GothamBold
-reelIndicator.Parent = topBar
+-- Tab Switcher Bar
+local tabBar = Instance.new("Frame")
+tabBar.Size = UDim2.new(1, -16, 0, 26)
+tabBar.Position = UDim2.fromOffset(8, 38)
+tabBar.BackgroundColor3 = Color3.fromRGB(22, 26, 35)
+tabBar.BorderSizePixel = 0
+tabBar.Parent = mainFrame
 
-local minBtn = Instance.new("TextButton")
-minBtn.Size = UDim2.fromOffset(32, 26)
-minBtn.Position = UDim2.new(1, -80, 0, 6)
-minBtn.BackgroundTransparency = 1
-minBtn.Text = "—"
-minBtn.TextColor3 = THEME.muted
-minBtn.TextSize = 19
-minBtn.Font = Enum.Font.GothamBold
-minBtn.Parent = topBar
+local tabCorner = Instance.new("UICorner")
+tabCorner.CornerRadius = UDim.new(0, 6)
+tabCorner.Parent = tabBar
 
-local closeBtn = Instance.new("TextButton")
-closeBtn.Size = UDim2.fromOffset(32, 26)
-closeBtn.Position = UDim2.new(1, -42, 0, 6)
-closeBtn.BackgroundTransparency = 1
-closeBtn.Text = "×"
-closeBtn.TextColor3 = THEME.muted
-closeBtn.TextSize = 23
-closeBtn.Font = Enum.Font.Gotham
-closeBtn.Parent = topBar
-
-local topLine = Instance.new("Frame")
-topLine.Size = UDim2.new(1, -24, 0, 1)
-topLine.Position = UDim2.fromOffset(12, 38)
-topLine.BackgroundColor3 = THEME.divider
-topLine.BorderSizePixel = 0
-topLine.Parent = mainFrame
-
--- Reel Viewport
-local reelViewport = Instance.new("Frame")
-reelViewport.Name = "ReelViewport"
-reelViewport.Size = UDim2.new(1, -24, 1, -46)
-reelViewport.Position = UDim2.fromOffset(12, 42)
-reelViewport.BackgroundTransparency = 1
-reelViewport.ClipsDescendants = true
-reelViewport.Active = true
-reelViewport.Parent = mainFrame
-
-local reelTrack = Instance.new("Frame")
-reelTrack.Name = "ReelTrack"
-reelTrack.Size = UDim2.new(1, 0, 2, 0)
-reelTrack.Position = UDim2.fromOffset(0, 0)
-reelTrack.BackgroundTransparency = 1
-reelTrack.Parent = reelViewport
-
-local reelHeight = WIN_H - 46
-
-local function snapToReel(idx)
-	local clampedIdx = math.clamp(idx, 1, 2)
-	state.reelIndex = clampedIdx
-	reelIndicator.Text = "REEL " .. clampedIdx .. "/2 • SWIPE ↕"
-	local targetY = -(clampedIdx - 1) * reelHeight
-	TweenService:Create(
-		reelTrack,
-		TweenInfo.new(0.22, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
-		{ Position = UDim2.fromOffset(0, targetY) }
-	):Play()
+local function makeTabBtn(text: string, xOffset: number): TextButton
+	local btn = Instance.new("TextButton")
+	btn.Size = UDim2.new(0.5, -4, 1, -4)
+	btn.Position = UDim2.fromOffset(xOffset, 2)
+	btn.BackgroundColor3 = Color3.fromRGB(35, 42, 56)
+	btn.Text = text
+	btn.TextColor3 = Color3.fromRGB(240, 245, 255)
+	btn.Font = Enum.Font.GothamBold
+	btn.TextSize = 11
+	btn.BorderSizePixel = 0
+	btn.Parent = tabBar
+	local c = Instance.new("UICorner")
+	c.CornerRadius = UDim.new(0, 5)
+	c.Parent = btn
+	return btn
 end
 
--- Gesture snap-swipe vertikal
+local tabPrefBtn = makeTabBtn("Preferensi", 2)
+local tabReel2Btn = makeTabBtn("Reel 2", 171)
+
+-- Swipeable Page Container (Snap-Swipe)
+local pagesViewport = Instance.new("Frame")
+pagesViewport.Size = UDim2.new(1, -16, 0, 266)
+pagesViewport.Position = UDim2.fromOffset(8, 68)
+pagesViewport.BackgroundTransparency = 1
+pagesViewport.ClipsDescendants = true
+pagesViewport.Parent = mainFrame
+
+local pagesTrack = Instance.new("Frame")
+pagesTrack.Size = UDim2.new(2, 0, 1, 0)
+pagesTrack.Position = UDim2.fromScale(0, 0)
+pagesTrack.BackgroundTransparency = 1
+pagesTrack.Parent = pagesViewport
+
+local pagePref = Instance.new("Frame")
+pagePref.Size = UDim2.new(0.5, 0, 1, 0)
+pagePref.Position = UDim2.fromScale(0, 0)
+pagePref.BackgroundTransparency = 1
+pagePref.Parent = pagesTrack
+
+local pageReel2 = Instance.new("Frame")
+pageReel2.Size = UDim2.new(0.5, 0, 1, 0)
+pageReel2.Position = UDim2.fromScale(0.5, 0)
+pageReel2.BackgroundTransparency = 1
+pageReel2.Parent = pagesTrack
+
+local currentPageIndex = 0 -- 0 = Preferensi, 1 = Reel 2
+
+local function snapToPage(idx: number)
+	currentPageIndex = math.clamp(idx, 0, 1)
+	local targetPos = UDim2.fromScale(-currentPageIndex, 0)
+	TweenService:Create(pagesTrack, TweenInfo.new(0.18, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
+		Position = targetPos,
+	}):Play()
+
+	if currentPageIndex == 0 then
+		tabPrefBtn.BackgroundColor3 = Color3.fromRGB(48, 92, 165)
+		tabReel2Btn.BackgroundColor3 = Color3.fromRGB(30, 35, 46)
+	else
+		tabPrefBtn.BackgroundColor3 = Color3.fromRGB(30, 35, 46)
+		tabReel2Btn.BackgroundColor3 = Color3.fromRGB(48, 92, 165)
+	end
+end
+
+tabPrefBtn.MouseButton1Click:Connect(function()
+	snapToPage(0)
+end)
+tabReel2Btn.MouseButton1Click:Connect(function()
+	snapToPage(1)
+end)
+
+-- Snap-Swipe Gesture on pagesViewport
 do
 	local swiping = false
-	local swipeInput = nil
-	local startY = 0
-	local baseTrackY = 0
+	local swipeStartX = 0
+	local trackStartX = 0
 
-	reelViewport.InputBegan:Connect(function(input)
-		if input.UserInputType == Enum.UserInputType.Touch or input.UserInputType == Enum.UserInputType.MouseButton1 then
+	pagesViewport.InputBegan:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
 			swiping = true
-			swipeInput = input
-			startY = input.Position.Y
-			baseTrackY = reelTrack.Position.Y.Offset
+			swipeStartX = input.Position.X
+			trackStartX = pagesTrack.Position.X.Scale * pagesViewport.AbsoluteSize.X
 		end
 	end)
 
-	reelViewport.InputChanged:Connect(function(input)
-		if swiping and (input == swipeInput or input.UserInputType == Enum.UserInputType.Touch or input.UserInputType == Enum.UserInputType.MouseMovement) then
-			local deltaY = input.Position.Y - startY
-			local minY = -reelHeight
-			local maxY = 0
-			local nextY = math.clamp(baseTrackY + deltaY, minY - 24, maxY + 24)
-			reelTrack.Position = UDim2.fromOffset(0, nextY)
-		end
-	end)
-
-	UserInputService.InputEnded:Connect(function(input)
-		if swiping and (input == swipeInput or input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch) then
+	pagesViewport.InputEnded:Connect(function(input)
+		if swiping and (input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch) then
 			swiping = false
-			local deltaY = input.Position.Y - startY
-			if deltaY < -38 then
-				snapToReel(state.reelIndex + 1)
-			elseif deltaY > 38 then
-				snapToReel(state.reelIndex - 1)
+			local deltaX = input.Position.X - swipeStartX
+			if math.abs(deltaX) > 45 then
+				if deltaX < 0 then
+					snapToPage(currentPageIndex + 1)
+				else
+					snapToPage(currentPageIndex - 1)
+				end
 			else
-				snapToReel(state.reelIndex)
+				snapToPage(currentPageIndex)
 			end
 		end
 	end)
 end
 
--- ============================================================================
--- REEL 1: 4 TAB + GRID + PATCH / PREFERENSI / MAIN / SETTING
--- ============================================================================
-local reel1 = Instance.new("Frame")
-reel1.Size = UDim2.new(1, 0, 0.5, 0)
-reel1.Position = UDim2.fromOffset(0, 0)
-reel1.BackgroundTransparency = 1
-reel1.Parent = reelTrack
+--// PAGE 1: PREFERENSI
+-- Top Row: Device Picker + Add Fixture (+) + Universe Cycle
+local devPrevBtn = Instance.new("TextButton")
+devPrevBtn.Size = UDim2.fromOffset(24, 24)
+devPrevBtn.Position = UDim2.fromOffset(0, 0)
+devPrevBtn.BackgroundColor3 = Color3.fromRGB(32, 38, 50)
+devPrevBtn.Text = "<"
+devPrevBtn.TextColor3 = Color3.fromRGB(220, 230, 245)
+devPrevBtn.Font = Enum.Font.GothamBold
+devPrevBtn.TextSize = 12
+devPrevBtn.BorderSizePixel = 0
+devPrevBtn.Parent = pagePref
+Instance.new("UICorner", devPrevBtn).CornerRadius = UDim.new(0, 5)
 
-local tabNames = { "patch", "Preferensi", "main", "Setting" }
-local tabButtons = {}
-local tabContainer = Instance.new("Frame")
-tabContainer.Size = UDim2.new(1, 0, 0, 26)
-tabContainer.Position = UDim2.fromOffset(0, 2)
-tabContainer.BackgroundTransparency = 1
-tabContainer.Parent = reel1
+local devTypeLabel = Instance.new("TextButton")
+devTypeLabel.Size = UDim2.fromOffset(174, 24)
+devTypeLabel.Position = UDim2.fromOffset(28, 0)
+devTypeLabel.BackgroundColor3 = Color3.fromRGB(26, 31, 41)
+devTypeLabel.Text = AVAILABLE_DEVICE_TYPES[state.addDeviceIdx]
+devTypeLabel.TextColor3 = Color3.fromRGB(240, 245, 255)
+devTypeLabel.Font = Enum.Font.GothamBold
+devTypeLabel.TextSize = 11
+devTypeLabel.BorderSizePixel = 0
+devTypeLabel.Parent = pagePref
+Instance.new("UICorner", devTypeLabel).CornerRadius = UDim.new(0, 5)
 
-local tabLayout = Instance.new("UIListLayout")
-tabLayout.FillDirection = Enum.FillDirection.Horizontal
-tabLayout.HorizontalAlignment = Enum.HorizontalAlignment.Center
-tabLayout.Padding = UDim.new(0, 7)
-tabLayout.Parent = tabContainer
-
-local bodyFrame = Instance.new("Frame")
-bodyFrame.Size = UDim2.new(1, 0, 1, -32)
-bodyFrame.Position = UDim2.fromOffset(0, 32)
-bodyFrame.BackgroundTransparency = 1
-bodyFrame.Parent = reel1
-
--- Shared Channel Grid (sinkron 1:1 di patch & Preferensi)
-local sharedChannelHolder = Instance.new("Frame")
-sharedChannelHolder.Size = UDim2.new(1, 0, 0, 106)
-sharedChannelHolder.Position = UDim2.fromOffset(0, 0)
-sharedChannelHolder.BackgroundTransparency = 1
-sharedChannelHolder.Parent = bodyFrame
-
-local channelFrame = Instance.new("ScrollingFrame")
-channelFrame.Name = "ChannelContainer"
-channelFrame.Size = UDim2.new(1, 0, 0, 82)
-channelFrame.Position = UDim2.fromOffset(0, 0)
-channelFrame.BackgroundTransparency = 1
-channelFrame.ScrollBarThickness = 2
-channelFrame.ScrollBarImageColor3 = THEME.stroke
-channelFrame.CanvasSize = UDim2.fromOffset(0, 0)
-channelFrame.AutomaticCanvasSize = Enum.AutomaticSize.Y
-channelFrame.Parent = sharedChannelHolder
-
-local channelGrid = Instance.new("UIGridLayout")
-channelGrid.CellSize = UDim2.fromOffset(48, 36)
-channelGrid.CellPadding = UDim2.fromOffset(6, 6)
-channelGrid.FillDirection = Enum.FillDirection.Horizontal
-channelGrid.SortOrder = Enum.SortOrder.LayoutOrder
-channelGrid.Parent = channelFrame
-
-local pageLabel = Instance.new("TextLabel")
-pageLabel.Size = UDim2.fromOffset(88, 18)
-pageLabel.Position = UDim2.fromOffset(0, 86)
-pageLabel.BackgroundTransparency = 1
-pageLabel.Text = "page 1"
-pageLabel.TextXAlignment = Enum.TextXAlignment.Left
-pageLabel.TextColor3 = THEME.muted
-pageLabel.TextSize = 12
-pageLabel.Font = Enum.Font.Gotham
-pageLabel.Parent = sharedChannelHolder
-
-local nextPageBtn = Instance.new("TextButton")
-nextPageBtn.Size = UDim2.fromOffset(96, 18)
-nextPageBtn.Position = UDim2.new(1, -96, 0, 86)
-nextPageBtn.BackgroundTransparency = 1
-nextPageBtn.Text = "next page >"
-nextPageBtn.TextXAlignment = Enum.TextXAlignment.Right
-nextPageBtn.TextColor3 = THEME.muted
-nextPageBtn.TextSize = 12
-nextPageBtn.Font = Enum.Font.Gotham
-nextPageBtn.Parent = sharedChannelHolder
-
--- Tab 1: Patch
-local patchPage = Instance.new("Frame")
-patchPage.Size = UDim2.new(1, 0, 1, -108)
-patchPage.Position = UDim2.fromOffset(0, 108)
-patchPage.BackgroundTransparency = 1
-patchPage.Visible = true
-patchPage.Parent = bodyFrame
+local devNextBtn = Instance.new("TextButton")
+devNextBtn.Size = UDim2.fromOffset(24, 24)
+devNextBtn.Position = UDim2.fromOffset(206, 0)
+devNextBtn.BackgroundColor3 = Color3.fromRGB(32, 38, 50)
+devNextBtn.Text = ">"
+devNextBtn.TextColor3 = Color3.fromRGB(220, 230, 245)
+devNextBtn.Font = Enum.Font.GothamBold
+devNextBtn.TextSize = 12
+devNextBtn.BorderSizePixel = 0
+devNextBtn.Parent = pagePref
+Instance.new("UICorner", devNextBtn).CornerRadius = UDim.new(0, 5)
 
 local addFixtureBtn = Instance.new("TextButton")
-addFixtureBtn.Size = UDim2.fromOffset(102, 25)
-addFixtureBtn.Position = UDim2.new(1, -102, 0, 0)
-addFixtureBtn.BackgroundColor3 = THEME.primary
-addFixtureBtn.Text = "add fixture +"
-addFixtureBtn.TextColor3 = THEME.text
-addFixtureBtn.TextSize = 12
-addFixtureBtn.Font = Enum.Font.GothamMedium
+addFixtureBtn.Size = UDim2.fromOffset(58, 24)
+addFixtureBtn.Position = UDim2.fromOffset(234, 0)
+addFixtureBtn.BackgroundColor3 = Color3.fromRGB(42, 130, 88)
+addFixtureBtn.Text = "+ Patch"
+addFixtureBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+addFixtureBtn.Font = Enum.Font.GothamBold
+addFixtureBtn.TextSize = 11
 addFixtureBtn.BorderSizePixel = 0
-addFixtureBtn.Parent = patchPage
-Instance.new("UICorner", addFixtureBtn).CornerRadius = UDim.new(0, 7)
+addFixtureBtn.Parent = pagePref
+Instance.new("UICorner", addFixtureBtn).CornerRadius = UDim.new(0, 5)
 
-local fixtureRow = Instance.new("Frame")
-fixtureRow.Size = UDim2.new(1, 0, 0, 28)
-fixtureRow.Position = UDim2.fromOffset(0, 29)
-fixtureRow.BackgroundColor3 = THEME.surface
-fixtureRow.BorderSizePixel = 0
-fixtureRow.Parent = patchPage
-Instance.new("UICorner", fixtureRow).CornerRadius = UDim.new(1, 0)
-local fixStroke = Instance.new("UIStroke", fixtureRow)
-fixStroke.Color = THEME.stroke
-fixStroke.Thickness = 1.2
+local univBtn = Instance.new("TextButton")
+univBtn.Size = UDim2.fromOffset(38, 24)
+univBtn.Position = UDim2.fromOffset(296, 0)
+univBtn.BackgroundColor3 = Color3.fromRGB(45, 54, 72)
+univBtn.Text = "U1"
+univBtn.TextColor3 = Color3.fromRGB(150, 215, 255)
+univBtn.Font = Enum.Font.GothamBold
+univBtn.TextSize = 11
+univBtn.BorderSizePixel = 0
+univBtn.Parent = pagePref
+Instance.new("UICorner", univBtn).CornerRadius = UDim.new(0, 5)
 
-local prevFixBtn = Instance.new("TextButton")
-prevFixBtn.Size = UDim2.fromOffset(34, 28)
-prevFixBtn.Position = UDim2.fromOffset(4, 0)
-prevFixBtn.BackgroundTransparency = 1
-prevFixBtn.Text = "◁"
-prevFixBtn.TextColor3 = THEME.muted
-prevFixBtn.TextSize = 14
-prevFixBtn.Font = Enum.Font.GothamBold
-prevFixBtn.Parent = fixtureRow
+-- Patched Summary Bar (shows box numbers, short tags, and start addresses)
+local patchSummaryLabel = Instance.new("TextLabel")
+patchSummaryLabel.Size = UDim2.new(1, 0, 0, 18)
+patchSummaryLabel.Position = UDim2.fromOffset(0, 27)
+patchSummaryLabel.BackgroundTransparency = 1
+patchSummaryLabel.Text = "Patch: Kosong"
+patchSummaryLabel.TextColor3 = Color3.fromRGB(165, 178, 200)
+patchSummaryLabel.Font = Enum.Font.GothamMedium
+patchSummaryLabel.TextSize = 10
+patchSummaryLabel.TextTruncate = Enum.TextTruncate.AtEnd
+patchSummaryLabel.TextXAlignment = Enum.TextXAlignment.Left
+patchSummaryLabel.Parent = pagePref
 
-local fixtureNameLabel = Instance.new("TextLabel")
-fixtureNameLabel.Size = UDim2.new(1, -84, 1, 0)
-fixtureNameLabel.Position = UDim2.fromOffset(42, 0)
-fixtureNameLabel.BackgroundTransparency = 1
-fixtureNameLabel.Text = getSelectedFixtureName()
-fixtureNameLabel.TextColor3 = THEME.text
-fixtureNameLabel.TextSize = 12
-fixtureNameLabel.Font = Enum.Font.GothamMedium
-fixtureNameLabel.Parent = fixtureRow
+-- Fixture Grid (Box_1, Box_2, ...)
+local gridFrame = Instance.new("ScrollingFrame")
+gridFrame.Size = UDim2.new(1, 0, 0, 96)
+gridFrame.Position = UDim2.fromOffset(0, 47)
+gridFrame.BackgroundColor3 = Color3.fromRGB(20, 24, 33)
+gridFrame.BorderSizePixel = 0
+gridFrame.ScrollBarThickness = 3
+gridFrame.CanvasSize = UDim2.fromOffset(0, 0)
+gridFrame.Parent = pagePref
+Instance.new("UICorner", gridFrame).CornerRadius = UDim.new(0, 6)
 
-local nextFixBtn = Instance.new("TextButton")
-nextFixBtn.Size = UDim2.fromOffset(34, 28)
-nextFixBtn.Position = UDim2.new(1, -38, 0, 0)
-nextFixBtn.BackgroundTransparency = 1
-nextFixBtn.Text = "▷"
-nextFixBtn.TextColor3 = THEME.muted
-nextFixBtn.TextSize = 14
-nextFixBtn.Font = Enum.Font.GothamBold
-nextFixBtn.Parent = fixtureRow
+local gridLayout = Instance.new("UIGridLayout")
+gridLayout.CellSize = UDim2.fromOffset(62, 38)
+gridLayout.CellPadding = UDim2.fromOffset(4, 4)
+gridLayout.SortOrder = Enum.SortOrder.LayoutOrder
+gridLayout.Parent = gridFrame
 
-local function createPill(parent, yPos, isInput, textOrPlaceholder)
-	local box = Instance.new(isInput and "TextBox" or "TextButton")
-	box.Size = UDim2.new(1, 0, 0, 27)
-	box.Position = UDim2.fromOffset(0, yPos)
-	box.BackgroundColor3 = THEME.surface
-	box.TextColor3 = THEME.text
-	box.TextSize = 12
-	box.Font = Enum.Font.GothamMedium
-	box.BorderSizePixel = 0
-	box.Parent = parent
-	if isInput then
-		box.Text = ""
-		box.PlaceholderText = textOrPlaceholder
-		box.PlaceholderColor3 = THEME.muted
-		box.ClearTextOnFocus = false
-	else
-		box.Text = textOrPlaceholder
-	end
-	Instance.new("UICorner", box).CornerRadius = UDim.new(1, 0)
-	local stroke = Instance.new("UIStroke", box)
-	stroke.Color = THEME.stroke
-	stroke.Thickness = 1.2
-	return box
-end
+local gridPadding = Instance.new("UIPadding")
+gridPadding.PaddingTop = UDim.new(0, 4)
+gridPadding.PaddingLeft = UDim.new(0, 4)
+gridPadding.PaddingRight = UDim.new(0, 4)
+gridPadding.PaddingBottom = UDim.new(0, 4)
+gridPadding.Parent = gridFrame
 
-local countBox = createPill(patchPage, 61, true, "count fixture your add")
-local universeBtn = createPill(patchPage, 92, false, "Universe 1")
-local autoCalcBtn = createPill(patchPage, 123, false, "Auto calculate")
+gridLayout:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
+	gridFrame.CanvasSize = UDim2.fromOffset(0, gridLayout.AbsoluteContentSize.Y + 8)
+end)
 
-addrBadge = Instance.new("TextLabel")
-addrBadge.Size = UDim2.fromOffset(162, 20)
-addrBadge.Position = UDim2.new(1, -162, 1, -20)
-addrBadge.BackgroundColor3 = THEME.badgeBg
-addrBadge.Text = "U1•A[1] .. TX:0"
-addrBadge.TextColor3 = THEME.text
-addrBadge.TextSize = 10
-addrBadge.Font = Enum.Font.GothamBold
-addrBadge.BorderSizePixel = 0
-addrBadge.Parent = patchPage
-Instance.new("UICorner", addrBadge).CornerRadius = UDim.new(0, 6)
-local badgeStroke = Instance.new("UIStroke", addrBadge)
-badgeStroke.Color = THEME.stroke
-badgeStroke.Thickness = 1
+-- Parameter Pill Selector (◁ Param [Ch.X] ▷)
+local paramPrevBtn = Instance.new("TextButton")
+paramPrevBtn.Size = UDim2.fromOffset(36, 26)
+paramPrevBtn.Position = UDim2.fromOffset(0, 150)
+paramPrevBtn.BackgroundColor3 = Color3.fromRGB(32, 38, 50)
+paramPrevBtn.Text = "◁"
+paramPrevBtn.TextColor3 = Color3.fromRGB(230, 238, 250)
+paramPrevBtn.Font = Enum.Font.GothamBold
+paramPrevBtn.TextSize = 12
+paramPrevBtn.BorderSizePixel = 0
+paramPrevBtn.Parent = pagePref
+Instance.new("UICorner", paramPrevBtn).CornerRadius = UDim.new(0, 5)
 
--- Tab 2: Preferensi (Otomatis ngikutin device: Effect/Warna/SpeedEffect | Pan/Tilt/Gobo/Prisma/dll. + fader)
-local prefPage = Instance.new("Frame")
-prefPage.Size = UDim2.new(1, 0, 1, -108)
-prefPage.Position = UDim2.fromOffset(0, 108)
-prefPage.BackgroundTransparency = 1
-prefPage.Visible = false
-prefPage.Parent = bodyFrame
+local paramPillBtn = Instance.new("TextButton")
+paramPillBtn.Size = UDim2.fromOffset(262, 26)
+paramPillBtn.Position = UDim2.fromOffset(40, 150)
+paramPillBtn.BackgroundColor3 = Color3.fromRGB(28, 34, 46)
+paramPillBtn.Text = "Dimmer [0]"
+paramPillBtn.TextColor3 = Color3.fromRGB(130, 215, 255)
+paramPillBtn.Font = Enum.Font.GothamBold
+paramPillBtn.TextSize = 11
+paramPillBtn.BorderSizePixel = 0
+paramPillBtn.Parent = pagePref
+Instance.new("UICorner", paramPillBtn).CornerRadius = UDim.new(0, 5)
 
-local paramSelectorRow = Instance.new("Frame")
-paramSelectorRow.Size = UDim2.new(1, -100, 0, 26)
-paramSelectorRow.Position = UDim2.fromOffset(0, 8)
-paramSelectorRow.BackgroundColor3 = THEME.surfaceAlt
-paramSelectorRow.BorderSizePixel = 0
-paramSelectorRow.Parent = prefPage
-Instance.new("UICorner", paramSelectorRow).CornerRadius = UDim.new(0, 6)
-local paramRowStroke = Instance.new("UIStroke", paramSelectorRow)
-paramRowStroke.Color = THEME.stroke
-paramRowStroke.Thickness = 1
+local paramNextBtn = Instance.new("TextButton")
+paramNextBtn.Size = UDim2.fromOffset(32, 26)
+paramNextBtn.Position = UDim2.fromOffset(306, 150)
+paramNextBtn.BackgroundColor3 = Color3.fromRGB(32, 38, 50)
+paramNextBtn.Text = "▷"
+paramNextBtn.TextColor3 = Color3.fromRGB(230, 238, 250)
+paramNextBtn.Font = Enum.Font.GothamBold
+paramNextBtn.TextSize = 12
+paramNextBtn.BorderSizePixel = 0
+paramNextBtn.Parent = pagePref
+Instance.new("UICorner", paramNextBtn).CornerRadius = UDim.new(0, 5)
 
-local prevParamBtn = Instance.new("TextButton")
-prevParamBtn.Size = UDim2.fromOffset(28, 26)
-prevParamBtn.Position = UDim2.fromOffset(0, 0)
-prevParamBtn.BackgroundTransparency = 1
-prevParamBtn.Text = "◁"
-prevParamBtn.TextColor3 = THEME.muted
-prevParamBtn.TextSize = 13
-prevParamBtn.Font = Enum.Font.GothamBold
-prevParamBtn.Parent = paramSelectorRow
-
-local activeParamLabel = Instance.new("TextButton")
-activeParamLabel.Size = UDim2.new(1, -56, 1, 0)
-activeParamLabel.Position = UDim2.fromOffset(28, 0)
-activeParamLabel.BackgroundColor3 = THEME.accent
-activeParamLabel.Text = "Pan"
-activeParamLabel.TextColor3 = THEME.text
-activeParamLabel.TextSize = 12
-activeParamLabel.Font = Enum.Font.GothamBold
-activeParamLabel.BorderSizePixel = 0
-activeParamLabel.Parent = paramSelectorRow
-Instance.new("UICorner", activeParamLabel).CornerRadius = UDim.new(0, 5)
-
-local nextParamBtn = Instance.new("TextButton")
-nextParamBtn.Size = UDim2.fromOffset(28, 26)
-nextParamBtn.Position = UDim2.new(1, -28, 0, 0)
-nextParamBtn.BackgroundTransparency = 1
-nextParamBtn.Text = "▷"
-nextParamBtn.TextColor3 = THEME.muted
-nextParamBtn.TextSize = 13
-nextParamBtn.Font = Enum.Font.GothamBold
-nextParamBtn.Parent = paramSelectorRow
-
-local numberDegLabel = Instance.new("TextLabel")
-numberDegLabel.Size = UDim2.fromOffset(92, 26)
-numberDegLabel.Position = UDim2.new(1, -92, 0, 8)
-numberDegLabel.BackgroundColor3 = THEME.surfaceAlt
-numberDegLabel.Text = "0°"
-numberDegLabel.TextColor3 = THEME.text
-numberDegLabel.TextSize = 12
-numberDegLabel.Font = Enum.Font.GothamBold
-numberDegLabel.BorderSizePixel = 0
-numberDegLabel.Parent = prefPage
-Instance.new("UICorner", numberDegLabel).CornerRadius = UDim.new(0, 4)
-local degStroke = Instance.new("UIStroke", numberDegLabel)
-degStroke.Color = THEME.stroke
-degStroke.Thickness = 1
-
-local faderHitArea = Instance.new("TextButton")
-faderHitArea.Size = UDim2.new(1, 0, 0, 32)
-faderHitArea.Position = UDim2.fromOffset(0, 46)
-faderHitArea.BackgroundTransparency = 1
-faderHitArea.Text = ""
-faderHitArea.AutoButtonColor = false
-faderHitArea.Parent = prefPage
-
+-- Single Dynamic Fader
 local faderTrack = Instance.new("Frame")
-faderTrack.Size = UDim2.new(1, 0, 0, 6)
-faderTrack.Position = UDim2.fromOffset(0, 13)
-faderTrack.BackgroundColor3 = THEME.track
+faderTrack.Size = UDim2.new(1, 0, 0, 36)
+faderTrack.Position = UDim2.fromOffset(0, 183)
+faderTrack.BackgroundColor3 = Color3.fromRGB(25, 30, 41)
 faderTrack.BorderSizePixel = 0
-faderTrack.Parent = faderHitArea
-Instance.new("UICorner", faderTrack).CornerRadius = UDim.new(1, 0)
+faderTrack.Parent = pagePref
+Instance.new("UICorner", faderTrack).CornerRadius = UDim.new(0, 6)
 
-local faderThumb = Instance.new("TextButton")
-faderThumb.Size = UDim2.fromOffset(36, 22)
-faderThumb.Position = UDim2.fromOffset(0, -8)
-faderThumb.BackgroundColor3 = THEME.accent
-faderThumb.Text = ""
-faderThumb.BorderSizePixel = 0
-faderThumb.Parent = faderTrack
-Instance.new("UICorner", faderThumb).CornerRadius = UDim.new(0, 4)
+local faderFill = Instance.new("Frame")
+faderFill.Size = UDim2.new(0, 0, 1, 0)
+faderFill.BackgroundColor3 = Color3.fromRGB(58, 125, 220)
+faderFill.BorderSizePixel = 0
+faderFill.Parent = faderTrack
+Instance.new("UICorner", faderFill).CornerRadius = UDim.new(0, 6)
 
-local function formatParamValueText(paramKey, ratio)
-	local meta = PARAM_META[paramKey] or {}
-	if meta.maxDeg then
-		local degVal = math.floor(ratio * meta.maxDeg + 0.5)
-		return tostring(degVal) .. "°"
+local faderValueLabel = Instance.new("TextLabel")
+faderValueLabel.Size = UDim2.new(1, -12, 1, 0)
+faderValueLabel.Position = UDim2.fromOffset(6, 0)
+faderValueLabel.BackgroundTransparency = 1
+faderValueLabel.Text = "0 (0%)"
+faderValueLabel.TextColor3 = Color3.fromRGB(245, 248, 255)
+faderValueLabel.Font = Enum.Font.GothamBold
+faderValueLabel.TextSize = 12
+faderValueLabel.TextXAlignment = Enum.TextXAlignment.Right
+faderValueLabel.Parent = faderTrack
+
+-- Bottom Quick Action Bar in Preferensi
+local zeroBtn = Instance.new("TextButton")
+zeroBtn.Size = UDim2.fromOffset(108, 30)
+zeroBtn.Position = UDim2.fromOffset(0, 228)
+zeroBtn.BackgroundColor3 = Color3.fromRGB(48, 34, 38)
+zeroBtn.Text = "Zero Param"
+zeroBtn.TextColor3 = Color3.fromRGB(255, 165, 175)
+zeroBtn.Font = Enum.Font.GothamBold
+zeroBtn.TextSize = 11
+zeroBtn.BorderSizePixel = 0
+zeroBtn.Parent = pagePref
+Instance.new("UICorner", zeroBtn).CornerRadius = UDim.new(0, 6)
+
+local fullBtn = Instance.new("TextButton")
+fullBtn.Size = UDim2.fromOffset(108, 30)
+fullBtn.Position = UDim2.fromOffset(115, 228)
+fullBtn.BackgroundColor3 = Color3.fromRGB(32, 54, 46)
+fullBtn.Text = "Full (255)"
+fullBtn.TextColor3 = Color3.fromRGB(150, 255, 195)
+fullBtn.Font = Enum.Font.GothamBold
+fullBtn.TextSize = 11
+fullBtn.BorderSizePixel = 0
+fullBtn.Parent = pagePref
+Instance.new("UICorner", fullBtn).CornerRadius = UDim.new(0, 6)
+
+local selectAllBtn = Instance.new("TextButton")
+selectAllBtn.Size = UDim2.fromOffset(108, 30)
+selectAllBtn.Position = UDim2.fromOffset(230, 228)
+selectAllBtn.BackgroundColor3 = Color3.fromRGB(36, 44, 60)
+selectAllBtn.Text = "Select All"
+selectAllBtn.TextColor3 = Color3.fromRGB(210, 225, 248)
+selectAllBtn.Font = Enum.Font.GothamBold
+selectAllBtn.TextSize = 11
+selectAllBtn.BorderSizePixel = 0
+selectAllBtn.Parent = pagePref
+Instance.new("UICorner", selectAllBtn).CornerRadius = UDim.new(0, 6)
+
+--// PAGE 2: REEL 2 (Master Dimmer + Blackout + Info Patch Lengkap)
+local reelTitle = Instance.new("TextLabel")
+reelTitle.Size = UDim2.new(1, 0, 0, 22)
+reelTitle.Position = UDim2.fromOffset(0, 0)
+reelTitle.BackgroundTransparency = 1
+reelTitle.Text = "REEL 2 • MASTER & PATCH LIST"
+reelTitle.TextColor3 = Color3.fromRGB(220, 232, 248)
+reelTitle.Font = Enum.Font.GothamBold
+reelTitle.TextSize = 12
+reelTitle.TextXAlignment = Enum.TextXAlignment.Left
+reelTitle.Parent = pageReel2
+
+local blackoutBtn = Instance.new("TextButton")
+blackoutBtn.Size = UDim2.fromOffset(162, 32)
+blackoutBtn.Position = UDim2.fromOffset(0, 28)
+blackoutBtn.BackgroundColor3 = Color3.fromRGB(135, 34, 42)
+blackoutBtn.Text = "BLACKOUT (0)"
+blackoutBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+blackoutBtn.Font = Enum.Font.GothamBold
+blackoutBtn.TextSize = 12
+blackoutBtn.BorderSizePixel = 0
+blackoutBtn.Parent = pageReel2
+Instance.new("UICorner", blackoutBtn).CornerRadius = UDim.new(0, 6)
+
+local masterFullBtn = Instance.new("TextButton")
+masterFullBtn.Size = UDim2.fromOffset(164, 32)
+masterFullBtn.Position = UDim2.fromOffset(170, 28)
+masterFullBtn.BackgroundColor3 = Color3.fromRGB(38, 92, 168)
+masterFullBtn.Text = "ALL DIMMER 255"
+masterFullBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+masterFullBtn.Font = Enum.Font.GothamBold
+masterFullBtn.TextSize = 12
+masterFullBtn.BorderSizePixel = 0
+masterFullBtn.Parent = pageReel2
+Instance.new("UICorner", masterFullBtn).CornerRadius = UDim.new(0, 6)
+
+local patchDetailBox = Instance.new("TextLabel")
+patchDetailBox.Size = UDim2.new(1, 0, 0, 196)
+patchDetailBox.Position = UDim2.fromOffset(0, 68)
+patchDetailBox.BackgroundColor3 = Color3.fromRGB(20, 24, 33)
+patchDetailBox.Text = "Belum ada fixture di-patch."
+patchDetailBox.TextColor3 = Color3.fromRGB(190, 205, 228)
+patchDetailBox.Font = Enum.Font.Code
+patchDetailBox.TextSize = 11
+patchDetailBox.TextWrapped = true
+patchDetailBox.TextYAlignment = Enum.TextYAlignment.Top
+patchDetailBox.TextXAlignment = Enum.TextXAlignment.Left
+patchDetailBox.BorderSizePixel = 0
+patchDetailBox.Parent = pageReel2
+Instance.new("UICorner", patchDetailBox).CornerRadius = UDim.new(0, 6)
+
+local detailPad = Instance.new("UIPadding", patchDetailBox)
+detailPad.PaddingTop = UDim.new(0, 8)
+detailPad.PaddingLeft = UDim.new(0, 8)
+detailPad.PaddingRight = UDim.new(0, 8)
+detailPad.PaddingBottom = UDim.new(0, 8)
+
+--// Logic Helpers
+local function getActiveParamsForSelection(): { string }
+	local list = state.patchedByUniv[state.universe] or {}
+	local targetItem: PatchedItem? = nil
+	if state.activeBoxIndex and list[state.activeBoxIndex] then
+		targetItem = list[state.activeBoxIndex]
+	else
+		for idx, isSel in pairs(state.selectedIndices) do
+			if isSel and list[idx] then
+				targetItem = list[idx]
+				break
+			end
+		end
 	end
-	return tostring(math.floor(ratio * 255 + 0.5))
-end
 
-local function syncFaderForActiveParam(sendDmx)
-	ensureValidActiveParam()
-	local key = state.activeParamKey
-	local r = math.clamp(state.paramRatios[key] or 0, 0, 1)
-	local maxOffset = math.max(1, faderTrack.AbsoluteSize.X - faderThumb.AbsoluteSize.X)
-	faderThumb.Position = UDim2.fromOffset(math.floor(r * maxOffset), -8)
-
-	local meta = PARAM_META[key] or {}
-	activeParamLabel.Text = meta.label or key
-	numberDegLabel.Text = formatParamValueText(key, r)
-
-	if sendDmx then
-		local dmxVal = math.floor(r * 255 + 0.5)
-		applyParamToSelected(key, dmxVal)
+	if targetItem then
+		return getParamListForDevice(targetItem.Type)
 	end
+	return { "Dimmer", "Shutter", "Red", "Green", "Blue", "White", "Effect", "Effect2", "Speed" }
 end
 
-local function setFaderRatio(ratio)
-	ensureValidActiveParam()
-	local key = state.activeParamKey
-	state.paramRatios[key] = math.clamp(ratio, 0, 1)
-	syncFaderForActiveParam(true)
+local function formatParamDisplayText(paramName: string): string
+	local meta = PARAM_META[paramName] or { label = paramName, kind = "dmx" }
+	local list = state.patchedByUniv[state.universe] or {}
+	local targetItem: PatchedItem? = nil
+	if state.activeBoxIndex and list[state.activeBoxIndex] then
+		targetItem = list[state.activeBoxIndex]
+	end
+
+	if targetItem then
+		local offset = targetItem.Profile[paramName]
+		if type(offset) == "number" then
+			local ch = targetItem.Address + offset
+			return meta.label .. " [Ch." .. tostring(ch) .. "]"
+		end
+	end
+	return meta.label
 end
 
-local function cycleParam(step)
-	local params = ensureValidActiveParam()
-	local curIdx = 1
-	for i, k in ipairs(params) do
-		if k == state.activeParamKey then
-			curIdx = i
+local function formatRatioText(paramName: string, ratio: number): string
+	local r = math.clamp(ratio, 0, 1)
+	local dmxVal = math.clamp(math.floor(r * MAX_VALUE + 0.5), MIN_VALUE, MAX_VALUE)
+	local meta = PARAM_META[paramName] or { label = paramName, kind = "dmx" }
+
+	if meta.kind == "pan" then
+		local deg = math.floor(r * 540 + 0.5)
+		return tostring(dmxVal) .. " (" .. tostring(deg) .. "°)"
+	elseif meta.kind == "tilt" then
+		local deg = math.floor(r * 270 + 0.5)
+		return tostring(dmxVal) .. " (" .. tostring(deg) .. "°)"
+	elseif meta.kind == "percent" then
+		local pct = math.floor(r * 100 + 0.5)
+		return tostring(dmxVal) .. " (" .. tostring(pct) .. "%)"
+	end
+	return tostring(dmxVal)
+end
+
+local function syncParamAndFader()
+	local params = getActiveParamsForSelection()
+	local found = false
+	for _, p in ipairs(params) do
+		if p == state.activeParam then
+			found = true
 			break
 		end
 	end
-	local nextIdx = ((curIdx - 1 + step) % #params) + 1
-	state.activeParamKey = params[nextIdx]
-	syncFaderForActiveParam(false)
-end
-
-do
-	local sliding = false
-	local slideInput = nil
-
-	local function updateFromX(posX)
-		local left = faderTrack.AbsolutePosition.X
-		local width = math.max(1, faderTrack.AbsoluteSize.X)
-		setFaderRatio((posX - left) / width)
+	if not found and #params > 0 then
+		state.activeParam = params[1]
 	end
 
-	local function beginSlide(input)
-		if input.UserInputType == Enum.UserInputType.Touch or input.UserInputType == Enum.UserInputType.MouseButton1 then
-			sliding = true
-			slideInput = input
-			updateFromX(input.Position.X)
+	paramPillBtn.Text = formatParamDisplayText(state.activeParam)
+
+	local ratio = math.clamp(state.paramRatios[state.activeParam] or 0, 0, 1)
+	faderFill.Size = UDim2.new(ratio, 0, 1, 0)
+	faderValueLabel.Text = formatRatioText(state.activeParam, ratio)
+end
+
+local function applyRatioToTargets(paramName: string, ratio: number)
+	local r = math.clamp(ratio, 0, 1)
+	state.paramRatios[paramName] = r
+
+	local list = state.patchedByUniv[state.universe] or {}
+	local anySelected = false
+	for idx, isSel in pairs(state.selectedIndices) do
+		if isSel and list[idx] then
+			anySelected = true
+			local offset = list[idx].Profile[paramName]
+			if type(offset) == "number" then
+				local ch = list[idx].Address + offset
+				local rawVal = math.clamp(math.floor(r * MAX_VALUE + 0.5), MIN_VALUE, MAX_VALUE)
+				sendChannelValue(state.universe, ch, rawVal)
+			end
 		end
 	end
 
-	faderHitArea.InputBegan:Connect(beginSlide)
-	faderThumb.InputBegan:Connect(beginSlide)
-
-	UserInputService.InputEnded:Connect(function(input)
-		if input == slideInput or input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
-			sliding = false
+	if not anySelected then
+		for _, item in ipairs(list) do
+			local offset = item.Profile[paramName]
+			if type(offset) == "number" then
+				local ch = item.Address + offset
+				local rawVal = math.clamp(math.floor(r * MAX_VALUE + 0.5), MIN_VALUE, MAX_VALUE)
+				sendChannelValue(state.universe, ch, rawVal)
+			end
 		end
-	end)
-
-	UserInputService.InputChanged:Connect(function(input)
-		if sliding and (input == slideInput or input.UserInputType == Enum.UserInputType.Touch or input.UserInputType == Enum.UserInputType.MouseMovement) then
-			updateFromX(input.Position.X)
-		end
-	end)
-end
-
--- Tab 3: main
-local mainPage = Instance.new("TextLabel")
-mainPage.Size = UDim2.fromScale(1, 1)
-mainPage.BackgroundTransparency = 1
-mainPage.TextColor3 = THEME.text
-mainPage.TextSize = 13
-mainPage.Font = Enum.Font.GothamMedium
-mainPage.TextWrapped = true
-mainPage.Visible = false
-mainPage.Parent = bodyFrame
-
--- Tab 4: Setting
-local settingPage = Instance.new("Frame")
-settingPage.Size = UDim2.fromScale(1, 1)
-settingPage.BackgroundTransparency = 1
-settingPage.Visible = false
-settingPage.Parent = bodyFrame
-
-local devicesPowerBtn = createPill(settingPage, 8, false, "Devices Power: OFF")
-local clearAllBtn = createPill(settingPage, 46, false, "Reset / Clear Patch")
-
--- ============================================================================
--- REEL 2: SNAP-SWIPE KE BAWAH (DEVICES POWER, RESET, & STATUS RINGKAS)
--- ============================================================================
-local reel2 = Instance.new("Frame")
-reel2.Size = UDim2.new(1, 0, 0.5, 0)
-reel2.Position = UDim2.fromOffset(0, reelHeight)
-reel2.BackgroundTransparency = 1
-reel2.Parent = reelTrack
-
-local reel2Title = Instance.new("TextLabel")
-reel2Title.Size = UDim2.new(1, 0, 0, 22)
-reel2Title.Position = UDim2.fromOffset(0, 4)
-reel2Title.BackgroundTransparency = 1
-reel2Title.Text = "QUICK DEVICES & SYSTEM"
-reel2Title.TextXAlignment = Enum.TextXAlignment.Left
-reel2Title.TextColor3 = THEME.muted
-reel2Title.TextSize = 12
-reel2Title.Font = Enum.Font.GothamBold
-reel2Title.Parent = reel2
-
-local reel2PowerBtn = createPill(reel2, 34, false, "Devices Power: OFF")
-local reel2ClearBtn = createPill(reel2, 70, false, "Reset / Clear Patch")
-
-local reel2StatusCard = Instance.new("TextLabel")
-reel2StatusCard.Size = UDim2.new(1, 0, 0, 118)
-reel2StatusCard.Position = UDim2.fromOffset(0, 108)
-reel2StatusCard.BackgroundColor3 = THEME.surface
-reel2StatusCard.TextColor3 = THEME.text
-reel2StatusCard.TextSize = 12
-reel2StatusCard.Font = Enum.Font.GothamMedium
-reel2StatusCard.TextXAlignment = Enum.TextXAlignment.Left
-reel2StatusCard.TextYAlignment = Enum.TextYAlignment.Top
-reel2StatusCard.TextWrapped = true
-reel2StatusCard.BorderSizePixel = 0
-reel2StatusCard.Parent = reel2
-Instance.new("UICorner", reel2StatusCard).CornerRadius = UDim.new(0, 10)
-local cardStroke = Instance.new("UIStroke", reel2StatusCard)
-cardStroke.Color = THEME.stroke
-cardStroke.Thickness = 1.2
-
-local backToReel1Btn = createPill(reel2, 236, false, "↑ Swipe / Tap Back to Reel 1")
-
-local function syncPowerButtonStyle()
-	local txt = "Devices Power: " .. (state.devicesPowerOn and "ON" or "OFF")
-	local col = state.devicesPowerOn and THEME.accent or THEME.surface
-	devicesPowerBtn.Text = txt
-	devicesPowerBtn.BackgroundColor3 = col
-	reel2PowerBtn.Text = txt
-	reel2PowerBtn.BackgroundColor3 = col
-end
-
-local function toggleDevicesPower()
-	setDevicesPower(not state.devicesPowerOn)
-	syncPowerButtonStyle()
-end
-
-devicesPowerBtn.MouseButton1Click:Connect(toggleDevicesPower)
-reel2PowerBtn.MouseButton1Click:Connect(toggleDevicesPower)
-backToReel1Btn.MouseButton1Click:Connect(function()
-	snapToReel(1)
-end)
-
-local function getOwnDmxFolder()
-	local carModel = getOwnCarModel(player)
-	if not carModel then return nil end
-	local misc = carModel:FindFirstChild("Misc")
-	if misc and misc:FindFirstChild("DmxLights") then
-		return misc:FindFirstChild("DmxLights")
 	end
-	local folder = carModel:FindFirstChild("Folder")
-	return (folder and folder:FindFirstChild("DmxLights")) or carModel:FindFirstChild("DmxLights", true)
+
+	if paramName == state.activeParam then
+		faderFill.Size = UDim2.new(r, 0, 1, 0)
+		faderValueLabel.Text = formatRatioText(paramName, r)
+	end
 end
 
-local function refreshUI()
-	fixtureNameLabel.Text = getSelectedFixtureName()
-	universeBtn.Text = "Universe " .. state.universe
-	pageLabel.Text = "page " .. state.page
-	syncPowerButtonStyle()
+local function refreshGridAndLabels()
+	univBtn.Text = "U" .. tostring(state.universe)
+	devTypeLabel.Text = AVAILABLE_DEVICE_TYPES[state.addDeviceIdx]
 
-	for _, child in ipairs(channelFrame:GetChildren()) do
+	for _, child in ipairs(gridFrame:GetChildren()) do
 		if child:IsA("TextButton") then
 			child:Destroy()
 		end
 	end
 
-	local totalBoxes = state.addedCountByUniv[state.universe] or 0
-	if totalBoxes > 0 then
-		local startIdx = (state.page - 1) * state.slotsPerPage + 1
-		local endIdx = math.min(totalBoxes, state.page * state.slotsPerPage)
+	local list = state.patchedByUniv[state.universe] or {}
+	local badgeParts = {}
+	local detailLines = {}
 
-		for idx = startIdx, endIdx do
-			local isSelected = state.selectedBoxes[idx] == true
-			local card = Instance.new("TextButton")
-			card.Name = "Box_" .. idx
-			card.LayoutOrder = idx - startIdx + 1
-			card.BackgroundColor3 = isSelected and THEME.accent or THEME.surface
-			card.Text = tostring(idx)
-			card.TextColor3 = isSelected and THEME.text or THEME.muted
-			card.TextSize = 13
-			card.Font = Enum.Font.GothamBold
-			card.BorderSizePixel = 0
-			card.Parent = channelFrame
+	for idx, item in ipairs(list) do
+		local tag = getShortTag(item.Type)
+		local isSel = state.selectedIndices[idx] == true
 
-			Instance.new("UICorner", card).CornerRadius = UDim.new(0, 7)
-			local stroke = Instance.new("UIStroke", card)
-			stroke.Color = isSelected and THEME.accent or THEME.stroke
-			stroke.Thickness = 1.2
+		local box = Instance.new("TextButton")
+		box.Name = "Box_" .. tostring(idx)
+		box.LayoutOrder = idx
+		box.BackgroundColor3 = isSel and Color3.fromRGB(52, 118, 212) or Color3.fromRGB(30, 36, 48)
+		box.Text = "#" .. tostring(idx) .. " " .. tag .. "\n@" .. tostring(item.Address)
+		box.TextColor3 = Color3.fromRGB(245, 248, 255)
+		box.Font = Enum.Font.GothamBold
+		box.TextSize = 10
+		box.BorderSizePixel = 0
+		box.Parent = gridFrame
+		Instance.new("UICorner", box).CornerRadius = UDim.new(0, 5)
 
-			-- Klik kotak hanya select/deselect; tidak langsung menyalakan device
-			card.MouseButton1Click:Connect(function()
-				state.selectedBoxes[idx] = not state.selectedBoxes[idx]
-				refreshUI()
-			end)
-		end
+		local stroke = Instance.new("UIStroke")
+		stroke.Color = (state.activeBoxIndex == idx) and Color3.fromRGB(140, 225, 255) or Color3.fromRGB(55, 65, 85)
+		stroke.Thickness = (state.activeBoxIndex == idx) and 1.5 or 1
+		stroke.Parent = box
+
+		box.MouseButton1Click:Connect(function()
+			state.activeBoxIndex = idx
+			if state.selectedIndices[idx] then
+				state.selectedIndices[idx] = nil
+			else
+				state.selectedIndices[idx] = true
+			end
+			refreshGridAndLabels()
+		end)
+
+		table.insert(badgeParts, "#" .. tostring(idx) .. "(" .. tag .. "@" .. tostring(item.Address) .. ")")
+		table.insert(detailLines, string.format(
+			"#%d | %-19s | Ch %d-%d (Span %d)",
+			idx,
+			item.Type,
+			item.Address,
+			item.EndAddress,
+			item.Profile.Span or 8
+		))
 	end
 
-	syncFaderForActiveParam(false)
-
-	updateBadge()
-	local selList = getSelectedBoxList()
-	local addrs = {}
-	for _, boxIdx in ipairs(selList) do
-		table.insert(addrs, tostring(resolveFixtureForBox(boxIdx).Address))
+	if #badgeParts == 0 then
+		addrBadge.Text = "U" .. tostring(state.universe) .. " • Kosong"
+		patchSummaryLabel.Text = "Patch: Belum ada fixture di Universe " .. tostring(state.universe)
+		patchDetailBox.Text = "Belum ada fixture di Universe " .. tostring(state.universe) .. ".\nKlik '+ Patch' di tab Preferensi."
+	else
+		addrBadge.Text = "U" .. tostring(state.universe) .. " • " .. table.concat(badgeParts, " ")
+		patchSummaryLabel.Text = "Patch: " .. table.concat(badgeParts, " | ")
+		patchDetailBox.Text = table.concat(detailLines, "\n")
 	end
-	local activeDev = getActiveDeviceType()
-	local statusStr = "Universe: U" .. state.universe .. (state.universe == 2 and " (512B)" or " (3B)")
-		.. "\nDevice: " .. activeDev
-		.. "\nSelected Box: " .. ((#selList > 0) and table.concat(selList, ", ") or "None")
-		.. "\nStart Addr: " .. ((#addrs > 0) and table.concat(addrs, ", ") or "None")
-		.. "\nDevices Power: " .. (state.devicesPowerOn and "ON" or "OFF")
 
-	mainPage.Text = statusStr
-	reel2StatusCard.Text = "  " .. string.gsub(statusStr, "\n", "\n  ")
+	syncParamAndFader()
 end
 
-for _, tName in ipairs(tabNames) do
-	local btn = Instance.new("TextButton")
-	btn.Size = UDim2.fromOffset(76, 26)
-	btn.Text = tName
-	btn.TextSize = 12
-	btn.Font = Enum.Font.GothamMedium
-	btn.BorderSizePixel = 0
-	btn.Parent = tabContainer
-	Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 8)
-	tabButtons[tName] = btn
+--// Fader Dragging
+do
+	local sliding = false
 
-	btn.MouseButton1Click:Connect(function()
-		state.activeTab = tName
-		for name, b in pairs(tabButtons) do
-			local active = (name == tName)
-			b.BackgroundColor3 = active and THEME.accent or THEME.surfaceAlt
-			b.TextColor3 = active and THEME.text or THEME.muted
+	local function updateFromX(posX: number)
+		local absPos = faderTrack.AbsolutePosition.X
+		local absSize = math.max(1, faderTrack.AbsoluteSize.X)
+		local ratio = math.clamp((posX - absPos) / absSize, 0, 1)
+		applyRatioToTargets(state.activeParam, ratio)
+	end
+
+	faderTrack.InputBegan:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+			sliding = true
+			updateFromX(input.Position.X)
 		end
-		sharedChannelHolder.Visible = (tName == "patch" or tName == "Preferensi")
-		patchPage.Visible = (tName == "patch")
-		prefPage.Visible = (tName == "Preferensi")
-		mainPage.Visible = (tName == "main")
-		settingPage.Visible = (tName == "Setting")
-		if tName == "Preferensi" then
-			task.defer(function()
-				syncFaderForActiveParam(false)
-			end)
+	end)
+
+	faderTrack.InputEnded:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+			sliding = false
+		end
+	end)
+
+	UserInputService.InputChanged:Connect(function(input)
+		if sliding and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+			updateFromX(input.Position.X)
 		end
 	end)
 end
 
-for name, b in pairs(tabButtons) do
-	local active = (name == state.activeTab)
-	b.BackgroundColor3 = active and THEME.accent or THEME.surfaceAlt
-	b.TextColor3 = active and THEME.text or THEME.muted
-end
-
-prevFixBtn.MouseButton1Click:Connect(function()
-	state.fixtureIndex = ((state.fixtureIndex - 2) % #fixtureNames) + 1
-	refreshUI()
+--// Button Connections
+devPrevBtn.MouseButton1Click:Connect(function()
+	state.addDeviceIdx = ((state.addDeviceIdx - 2) % #AVAILABLE_DEVICE_TYPES) + 1
+	refreshGridAndLabels()
 end)
 
-nextFixBtn.MouseButton1Click:Connect(function()
-	state.fixtureIndex = (state.fixtureIndex % #fixtureNames) + 1
-	refreshUI()
-end)
-
-universeBtn.MouseButton1Click:Connect(function()
-	state.universe = (state.universe == 1) and 2 or 1
-	state.page = 1
-	state.selectedBoxes = {}
-	rebuildAllUniverses()
-	refreshUI()
-end)
-
-autoCalcBtn.MouseButton1Click:Connect(function()
-	local dmxFolder = getOwnDmxFolder()
-	local keys = NameAliases[getSelectedFixtureName()] or { string.lower(getSelectedFixtureName()) }
-	local found = 0
-	if dmxFolder then
-		for _, desc in ipairs(dmxFolder:GetDescendants()) do
-			if matchesAnyKey(desc.Name, keys) then
-				found += 1
-			end
-		end
-	end
-	countBox.Text = tostring(found)
+devNextBtn.MouseButton1Click:Connect(function()
+	state.addDeviceIdx = (state.addDeviceIdx % #AVAILABLE_DEVICE_TYPES) + 1
+	refreshGridAndLabels()
 end)
 
 addFixtureBtn.MouseButton1Click:Connect(function()
-	local qty = math.max(1, math.floor(tonumber(countBox.Text) or 1))
-	local fixName = getSelectedFixtureName()
-	for _ = 1, qty do
-		table.insert(allRawFixtures, {
-			Type = fixName,
-			Universe = state.universe,
-		})
+	patchDevice(AVAILABLE_DEVICE_TYPES[state.addDeviceIdx])
+	refreshGridAndLabels()
+end)
+
+univBtn.MouseButton1Click:Connect(function()
+	state.universe = (state.universe == 1) and 2 or 1
+	ensureUniverse(state.universe)
+	state.selectedIndices = {}
+	state.activeBoxIndex = nil
+	refreshGridAndLabels()
+end)
+
+local function stepParam(delta: number)
+	local params = getActiveParamsForSelection()
+	if #params == 0 then return end
+	local idx = 1
+	for i, p in ipairs(params) do
+		if p == state.activeParam then
+			idx = i
+			break
+		end
 	end
-
-	rebuildAllUniverses()
-	refreshUI()
-end)
-
-nextPageBtn.MouseButton1Click:Connect(function()
-	local totalBoxes = state.addedCountByUniv[state.universe] or 0
-	local totalPages = math.max(1, math.ceil(totalBoxes / state.slotsPerPage))
-	state.page = (state.page % totalPages) + 1
-	refreshUI()
-end)
-
-prevParamBtn.MouseButton1Click:Connect(function()
-	cycleParam(-1)
-end)
-
-nextParamBtn.MouseButton1Click:Connect(function()
-	cycleParam(1)
-end)
-
-activeParamLabel.MouseButton1Click:Connect(function()
-	cycleParam(1)
-end)
-
-local function resetPatchState()
-	allRawFixtures = {}
-	for u = 1, DEFAULT_MAX_UNIVERSES do
-		state.rawByUniv[u] = {}
-		state.patchedByUniv[u] = {}
-		state.addedCountByUniv[u] = 0
-		transport:ClearUniverse(u)
-	end
-	state.selectedBoxes = {}
-	state.devicesPowerOn = false
-	state.paramRatios = {}
-	state.nextAddress = 1
-	state.page = 1
-	refreshUI()
+	local nextIdx = ((idx - 1 + delta) % #params) + 1
+	state.activeParam = params[nextIdx]
+	syncParamAndFader()
 end
 
-clearAllBtn.MouseButton1Click:Connect(resetPatchState)
-reel2ClearBtn.MouseButton1Click:Connect(resetPatchState)
-
-minBtn.MouseButton1Click:Connect(function()
-	local collapsed = mainFrame.Size.Y.Offset <= 46
-	mainFrame.Size = collapsed and UDim2.fromOffset(WIN_W, WIN_H) or UDim2.fromOffset(WIN_W, 42)
-	reelViewport.Visible = collapsed
-	reelIndicator.Visible = collapsed
+paramPrevBtn.MouseButton1Click:Connect(function()
+	stepParam(-1)
 end)
 
-closeBtn.MouseButton1Click:Connect(function()
-	if screenGui then
-		screenGui:Destroy()
+paramNextBtn.MouseButton1Click:Connect(function()
+	stepParam(1)
+end)
+
+paramPillBtn.MouseButton1Click:Connect(function()
+	stepParam(1)
+end)
+
+zeroBtn.MouseButton1Click:Connect(function()
+	applyRatioToTargets(state.activeParam, 0)
+end)
+
+fullBtn.MouseButton1Click:Connect(function()
+	applyRatioToTargets(state.activeParam, 1)
+end)
+
+selectAllBtn.MouseButton1Click:Connect(function()
+	local list = state.patchedByUniv[state.universe] or {}
+	if #list == 0 then return end
+	local allSelected = true
+	for i = 1, #list do
+		if not state.selectedIndices[i] then
+			allSelected = false
+			break
+		end
 	end
+	state.selectedIndices = {}
+	if not allSelected then
+		for i = 1, #list do
+			state.selectedIndices[i] = true
+		end
+	end
+	refreshGridAndLabels()
 end)
 
-refreshUI()
+blackoutBtn.MouseButton1Click:Connect(function()
+	state.paramRatios.Dimmer = 0
+	state.paramRatios.Shutter = 0
+	local list = state.patchedByUniv[state.universe] or {}
+	for _, item in ipairs(list) do
+		if type(item.Profile.Dimmer) == "number" then
+			sendChannelValue(state.universe, item.Address + item.Profile.Dimmer, 0)
+		end
+		if type(item.Profile.Shutter) == "number" then
+			sendChannelValue(state.universe, item.Address + item.Profile.Shutter, 0)
+		end
+	end
+	syncParamAndFader()
+end)
+
+masterFullBtn.MouseButton1Click:Connect(function()
+	state.paramRatios.Dimmer = 1
+	local list = state.patchedByUniv[state.universe] or {}
+	for _, item in ipairs(list) do
+		if type(item.Profile.Dimmer) == "number" then
+			sendChannelValue(state.universe, item.Address + item.Profile.Dimmer, 255)
+		end
+	end
+	syncParamAndFader()
+end)
+
+-- Initial Setup
+snapToPage(0)
+refreshGridAndLabels()
