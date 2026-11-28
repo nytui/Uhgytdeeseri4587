@@ -1,12 +1,11 @@
 --!strict
--- DMX Controller UI (350x340) - Dynamic Fixture Mapping & Patch Info
--- Supports: ClaraS14, Wallwasher_24X3W, StrobeBar_192_Segment, STROBE_1000W, Parled, Blinder
+-- DMX Controller UI (350x340) - Full Build
+-- Tabs via Top Buttons Only | Minimize (-) & Close (X) | Mobile Drag | Clear All Fixtures
 
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local UserInputService = game:GetService("UserInputService")
 local TweenService = game:GetService("TweenService")
-local RunService = game:GetService("RunService")
 
 local player = Players.LocalPlayer
 local playerGui = player:WaitForChild("PlayerGui")
@@ -329,41 +328,39 @@ mainFrame.BorderSizePixel = 0
 mainFrame.Active = true
 mainFrame.Parent = screenGui
 
-local mainCorner = Instance.new("UICorner")
-mainCorner.CornerRadius = UDim.new(0, 10)
-mainCorner.Parent = mainFrame
+Instance.new("UICorner", mainFrame).CornerRadius = UDim.new(0, 10)
 
 local mainStroke = Instance.new("UIStroke")
 mainStroke.Color = Color3.fromRGB(45, 55, 75)
 mainStroke.Thickness = 1
 mainStroke.Parent = mainFrame
 
--- Header Bar
+-- Header Bar + Minimize (-) + Close (X) + Mobile Drag
 local header = Instance.new("Frame")
+header.Name = "Header"
 header.Size = UDim2.new(1, 0, 0, 34)
 header.BackgroundColor3 = Color3.fromRGB(23, 28, 38)
 header.BorderSizePixel = 0
+header.Active = true
 header.Parent = mainFrame
 
-local headerCorner = Instance.new("UICorner")
-headerCorner.CornerRadius = UDim.new(0, 10)
-headerCorner.Parent = header
+Instance.new("UICorner", header).CornerRadius = UDim.new(0, 10)
 
 local titleLabel = Instance.new("TextLabel")
-titleLabel.Size = UDim2.new(0, 150, 1, 0)
+titleLabel.Size = UDim2.new(0, 122, 1, 0)
 titleLabel.Position = UDim2.fromOffset(10, 0)
 titleLabel.BackgroundTransparency = 1
 titleLabel.Text = "DMX 512 • 350x340"
 titleLabel.TextColor3 = Color3.fromRGB(235, 240, 250)
 titleLabel.Font = Enum.Font.GothamBold
-titleLabel.TextSize = 12
+titleLabel.TextSize = 11
 titleLabel.TextXAlignment = Enum.TextXAlignment.Left
 titleLabel.Parent = header
 
 local addrBadge = Instance.new("TextLabel")
 addrBadge.Name = "AddrBadge"
-addrBadge.Size = UDim2.new(0, 180, 1, 0)
-addrBadge.Position = UDim2.fromOffset(160, 0)
+addrBadge.Size = UDim2.new(0, 156, 1, 0)
+addrBadge.Position = UDim2.fromOffset(132, 0)
 addrBadge.BackgroundTransparency = 1
 addrBadge.Text = "U1 • Kosong"
 addrBadge.TextColor3 = Color3.fromRGB(120, 200, 255)
@@ -373,50 +370,42 @@ addrBadge.TextTruncate = Enum.TextTruncate.AtEnd
 addrBadge.TextXAlignment = Enum.TextXAlignment.Right
 addrBadge.Parent = header
 
--- Dragging support on Header
-do
-	local dragging = false
-	local dragStart = Vector2.zero
-	local startPos = UDim2.new()
+local minBtn = Instance.new("TextButton")
+minBtn.Name = "MinimizeBtn"
+minBtn.Size = UDim2.fromOffset(22, 22)
+minBtn.Position = UDim2.new(1, -54, 0.5, -11)
+minBtn.BackgroundColor3 = Color3.fromRGB(40, 48, 64)
+minBtn.Text = "-"
+minBtn.TextColor3 = Color3.fromRGB(235, 242, 255)
+minBtn.Font = Enum.Font.GothamBold
+minBtn.TextSize = 14
+minBtn.BorderSizePixel = 0
+minBtn.Active = true
+minBtn.Parent = header
+Instance.new("UICorner", minBtn).CornerRadius = UDim.new(0, 5)
 
-	header.InputBegan:Connect(function(input)
-		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
-			dragging = true
-			dragStart = Vector2.new(input.Position.X, input.Position.Y)
-			startPos = mainFrame.Position
-		end
-	end)
+local closeBtn = Instance.new("TextButton")
+closeBtn.Name = "CloseBtn"
+closeBtn.Size = UDim2.fromOffset(22, 22)
+closeBtn.Position = UDim2.new(1, -28, 0.5, -11)
+closeBtn.BackgroundColor3 = Color3.fromRGB(145, 38, 48)
+closeBtn.Text = "X"
+closeBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+closeBtn.Font = Enum.Font.GothamBold
+closeBtn.TextSize = 11
+closeBtn.BorderSizePixel = 0
+closeBtn.Active = true
+closeBtn.Parent = header
+Instance.new("UICorner", closeBtn).CornerRadius = UDim.new(0, 5)
 
-	header.InputEnded:Connect(function(input)
-		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
-			dragging = false
-		end
-	end)
-
-	UserInputService.InputChanged:Connect(function(input)
-		if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType.Touch) then
-			local delta = Vector2.new(input.Position.X, input.Position.Y) - dragStart
-			mainFrame.Position = UDim2.new(
-				startPos.X.Scale,
-				startPos.X.Offset + delta.X,
-				startPos.Y.Scale,
-				startPos.Y.Offset + delta.Y
-			)
-		end
-	end)
-end
-
--- Tab Switcher Bar
+-- Tab Switcher Bar (Top Buttons Only)
 local tabBar = Instance.new("Frame")
 tabBar.Size = UDim2.new(1, -16, 0, 26)
 tabBar.Position = UDim2.fromOffset(8, 38)
 tabBar.BackgroundColor3 = Color3.fromRGB(22, 26, 35)
 tabBar.BorderSizePixel = 0
 tabBar.Parent = mainFrame
-
-local tabCorner = Instance.new("UICorner")
-tabCorner.CornerRadius = UDim.new(0, 6)
-tabCorner.Parent = tabBar
+Instance.new("UICorner", tabBar).CornerRadius = UDim.new(0, 6)
 
 local function makeTabBtn(text: string, xOffset: number): TextButton
 	local btn = Instance.new("TextButton")
@@ -429,16 +418,14 @@ local function makeTabBtn(text: string, xOffset: number): TextButton
 	btn.TextSize = 11
 	btn.BorderSizePixel = 0
 	btn.Parent = tabBar
-	local c = Instance.new("UICorner")
-	c.CornerRadius = UDim.new(0, 5)
-	c.Parent = btn
+	Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 5)
 	return btn
 end
 
 local tabPrefBtn = makeTabBtn("Preferensi", 2)
 local tabReel2Btn = makeTabBtn("Reel 2", 171)
 
--- Swipeable Page Container (Snap-Swipe)
+-- Page Container (Button-Driven Only, No Swipe)
 local pagesViewport = Instance.new("Frame")
 pagesViewport.Size = UDim2.new(1, -16, 0, 266)
 pagesViewport.Position = UDim2.fromOffset(8, 68)
@@ -469,7 +456,7 @@ local currentPageIndex = 0 -- 0 = Preferensi, 1 = Reel 2
 local function snapToPage(idx: number)
 	currentPageIndex = math.clamp(idx, 0, 1)
 	local targetPos = UDim2.fromScale(-currentPageIndex, 0)
-	TweenService:Create(pagesTrack, TweenInfo.new(0.18, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
+	TweenService:Create(pagesTrack, TweenInfo.new(0.16, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
 		Position = targetPos,
 	}):Play()
 
@@ -485,43 +472,67 @@ end
 tabPrefBtn.MouseButton1Click:Connect(function()
 	snapToPage(0)
 end)
+
 tabReel2Btn.MouseButton1Click:Connect(function()
 	snapToPage(1)
 end)
 
--- Snap-Swipe Gesture on pagesViewport
-do
-	local swiping = false
-	local swipeStartX = 0
-	local trackStartX = 0
+local isMinimized = false
+minBtn.MouseButton1Click:Connect(function()
+	isMinimized = not isMinimized
+	tabBar.Visible = not isMinimized
+	pagesViewport.Visible = not isMinimized
+	mainFrame.Size = isMinimized and UDim2.fromOffset(350, 34) or UDim2.fromOffset(350, 340)
+	minBtn.Text = isMinimized and "+" or "-"
+end)
 
-	pagesViewport.InputBegan:Connect(function(input)
+closeBtn.MouseButton1Click:Connect(function()
+	screenGui:Destroy()
+end)
+
+-- Dragging support on Header (Mobile + PC)
+do
+	local dragging = false
+	local dragInput: InputObject? = nil
+	local dragStart = Vector2.zero
+	local startPos = UDim2.new()
+
+	header.InputBegan:Connect(function(input)
 		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
-			swiping = true
-			swipeStartX = input.Position.X
-			trackStartX = pagesTrack.Position.X.Scale * pagesViewport.AbsoluteSize.X
+			dragging = true
+			dragInput = input
+			dragStart = Vector2.new(input.Position.X, input.Position.Y)
+			startPos = mainFrame.Position
+
+			input.Changed:Connect(function()
+				if input.UserInputState == Enum.UserInputState.End then
+					dragging = false
+					dragInput = nil
+				end
+			end)
 		end
 	end)
 
-	pagesViewport.InputEnded:Connect(function(input)
-		if swiping and (input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch) then
-			swiping = false
-			local deltaX = input.Position.X - swipeStartX
-			if math.abs(deltaX) > 45 then
-				if deltaX < 0 then
-					snapToPage(currentPageIndex + 1)
-				else
-					snapToPage(currentPageIndex - 1)
-				end
-			else
-				snapToPage(currentPageIndex)
-			end
+	header.InputChanged:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch then
+			dragInput = input
+		end
+	end)
+
+	UserInputService.InputChanged:Connect(function(input)
+		if dragging and input == dragInput then
+			local delta = Vector2.new(input.Position.X, input.Position.Y) - dragStart
+			mainFrame.Position = UDim2.new(
+				startPos.X.Scale,
+				startPos.X.Offset + delta.X,
+				startPos.Y.Scale,
+				startPos.Y.Offset + delta.Y
+			)
 		end
 	end)
 end
 
 --// PAGE 1: PREFERENSI
--- Top Row: Device Picker + Add Fixture (+) + Universe Cycle
 local devPrevBtn = Instance.new("TextButton")
 devPrevBtn.Size = UDim2.fromOffset(24, 24)
 devPrevBtn.Position = UDim2.fromOffset(0, 0)
@@ -582,7 +593,6 @@ univBtn.BorderSizePixel = 0
 univBtn.Parent = pagePref
 Instance.new("UICorner", univBtn).CornerRadius = UDim.new(0, 5)
 
--- Patched Summary Bar (shows box numbers, short tags, and start addresses)
 local patchSummaryLabel = Instance.new("TextLabel")
 patchSummaryLabel.Size = UDim2.new(1, 0, 0, 18)
 patchSummaryLabel.Position = UDim2.fromOffset(0, 27)
@@ -595,7 +605,6 @@ patchSummaryLabel.TextTruncate = Enum.TextTruncate.AtEnd
 patchSummaryLabel.TextXAlignment = Enum.TextXAlignment.Left
 patchSummaryLabel.Parent = pagePref
 
--- Fixture Grid (Box_1, Box_2, ...)
 local gridFrame = Instance.new("ScrollingFrame")
 gridFrame.Size = UDim2.new(1, 0, 0, 96)
 gridFrame.Position = UDim2.fromOffset(0, 47)
@@ -623,7 +632,6 @@ gridLayout:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
 	gridFrame.CanvasSize = UDim2.fromOffset(0, gridLayout.AbsoluteContentSize.Y + 8)
 end)
 
--- Parameter Pill Selector (◁ Param [Ch.X] ▷)
 local paramPrevBtn = Instance.new("TextButton")
 paramPrevBtn.Size = UDim2.fromOffset(36, 26)
 paramPrevBtn.Position = UDim2.fromOffset(0, 150)
@@ -660,12 +668,12 @@ paramNextBtn.BorderSizePixel = 0
 paramNextBtn.Parent = pagePref
 Instance.new("UICorner", paramNextBtn).CornerRadius = UDim.new(0, 5)
 
--- Single Dynamic Fader
 local faderTrack = Instance.new("Frame")
 faderTrack.Size = UDim2.new(1, 0, 0, 36)
 faderTrack.Position = UDim2.fromOffset(0, 183)
 faderTrack.BackgroundColor3 = Color3.fromRGB(25, 30, 41)
 faderTrack.BorderSizePixel = 0
+faderTrack.Active = true
 faderTrack.Parent = pagePref
 Instance.new("UICorner", faderTrack).CornerRadius = UDim.new(0, 6)
 
@@ -687,7 +695,6 @@ faderValueLabel.TextSize = 12
 faderValueLabel.TextXAlignment = Enum.TextXAlignment.Right
 faderValueLabel.Parent = faderTrack
 
--- Bottom Quick Action Bar in Preferensi
 local zeroBtn = Instance.new("TextButton")
 zeroBtn.Size = UDim2.fromOffset(108, 30)
 zeroBtn.Position = UDim2.fromOffset(0, 228)
@@ -724,45 +731,57 @@ selectAllBtn.BorderSizePixel = 0
 selectAllBtn.Parent = pagePref
 Instance.new("UICorner", selectAllBtn).CornerRadius = UDim.new(0, 6)
 
---// PAGE 2: REEL 2 (Master Dimmer + Blackout + Info Patch Lengkap)
+--// PAGE 2: REEL 2
 local reelTitle = Instance.new("TextLabel")
-reelTitle.Size = UDim2.new(1, 0, 0, 22)
+reelTitle.Size = UDim2.new(1, 0, 0, 20)
 reelTitle.Position = UDim2.fromOffset(0, 0)
 reelTitle.BackgroundTransparency = 1
 reelTitle.Text = "REEL 2 • MASTER & PATCH LIST"
 reelTitle.TextColor3 = Color3.fromRGB(220, 232, 248)
 reelTitle.Font = Enum.Font.GothamBold
-reelTitle.TextSize = 12
+reelTitle.TextSize = 11
 reelTitle.TextXAlignment = Enum.TextXAlignment.Left
 reelTitle.Parent = pageReel2
 
 local blackoutBtn = Instance.new("TextButton")
-blackoutBtn.Size = UDim2.fromOffset(162, 32)
-blackoutBtn.Position = UDim2.fromOffset(0, 28)
+blackoutBtn.Size = UDim2.fromOffset(162, 28)
+blackoutBtn.Position = UDim2.fromOffset(0, 24)
 blackoutBtn.BackgroundColor3 = Color3.fromRGB(135, 34, 42)
 blackoutBtn.Text = "BLACKOUT (0)"
 blackoutBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
 blackoutBtn.Font = Enum.Font.GothamBold
-blackoutBtn.TextSize = 12
+blackoutBtn.TextSize = 11
 blackoutBtn.BorderSizePixel = 0
 blackoutBtn.Parent = pageReel2
 Instance.new("UICorner", blackoutBtn).CornerRadius = UDim.new(0, 6)
 
 local masterFullBtn = Instance.new("TextButton")
-masterFullBtn.Size = UDim2.fromOffset(164, 32)
-masterFullBtn.Position = UDim2.fromOffset(170, 28)
+masterFullBtn.Size = UDim2.fromOffset(164, 28)
+masterFullBtn.Position = UDim2.fromOffset(170, 24)
 masterFullBtn.BackgroundColor3 = Color3.fromRGB(38, 92, 168)
 masterFullBtn.Text = "ALL DIMMER 255"
 masterFullBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
 masterFullBtn.Font = Enum.Font.GothamBold
-masterFullBtn.TextSize = 12
+masterFullBtn.TextSize = 11
 masterFullBtn.BorderSizePixel = 0
 masterFullBtn.Parent = pageReel2
 Instance.new("UICorner", masterFullBtn).CornerRadius = UDim.new(0, 6)
 
+local clearAllBtn = Instance.new("TextButton")
+clearAllBtn.Size = UDim2.new(1, 0, 0, 26)
+clearAllBtn.Position = UDim2.fromOffset(0, 56)
+clearAllBtn.BackgroundColor3 = Color3.fromRGB(76, 28, 36)
+clearAllBtn.Text = "HAPUS SEMUA FIXTURE (UNIVERSE AKTIF)"
+clearAllBtn.TextColor3 = Color3.fromRGB(255, 180, 185)
+clearAllBtn.Font = Enum.Font.GothamBold
+clearAllBtn.TextSize = 11
+clearAllBtn.BorderSizePixel = 0
+clearAllBtn.Parent = pageReel2
+Instance.new("UICorner", clearAllBtn).CornerRadius = UDim.new(0, 6)
+
 local patchDetailBox = Instance.new("TextLabel")
-patchDetailBox.Size = UDim2.new(1, 0, 0, 196)
-patchDetailBox.Position = UDim2.fromOffset(0, 68)
+patchDetailBox.Size = UDim2.new(1, 0, 0, 178)
+patchDetailBox.Position = UDim2.fromOffset(0, 88)
 patchDetailBox.BackgroundColor3 = Color3.fromRGB(20, 24, 33)
 patchDetailBox.Text = "Belum ada fixture di-patch."
 patchDetailBox.TextColor3 = Color3.fromRGB(190, 205, 228)
@@ -962,9 +981,38 @@ local function refreshGridAndLabels()
 	syncParamAndFader()
 end
 
---// Fader Dragging
+local function clearCurrentUniverseFixtures()
+	local univ = state.universe
+	ensureUniverse(univ)
+
+	local list = state.patchedByUniv[univ] or {}
+	if udpRemote then
+		for _, item in ipairs(list) do
+			local prof = item.Profile
+			for key, offset in pairs(prof) do
+				if key ~= "Group" and key ~= "Span" and type(offset) == "number" then
+					local ch = item.Address + offset
+					if ch >= 1 and ch <= MAX_CHANNELS then
+						pcall(function()
+							udpRemote:FireServer(univ, ch, 0)
+						end)
+					end
+				end
+			end
+		end
+	end
+
+	state.patchedByUniv[univ] = {}
+	state.selectedIndices = {}
+	state.activeBoxIndex = nil
+	buffer.fill(state.univBuffers[univ], 0, 0, MAX_CHANNELS)
+	refreshGridAndLabels()
+end
+
+--// Fader Dragging (Mobile + PC)
 do
 	local sliding = false
+	local slideInput: InputObject? = nil
 
 	local function updateFromX(posX: number)
 		local absPos = faderTrack.AbsolutePosition.X
@@ -976,18 +1024,20 @@ do
 	faderTrack.InputBegan:Connect(function(input)
 		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
 			sliding = true
+			slideInput = input
 			updateFromX(input.Position.X)
-		end
-	end)
 
-	faderTrack.InputEnded:Connect(function(input)
-		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
-			sliding = false
+			input.Changed:Connect(function()
+				if input.UserInputState == Enum.UserInputState.End then
+					sliding = false
+					slideInput = nil
+				end
+			end)
 		end
 	end)
 
 	UserInputService.InputChanged:Connect(function(input)
-		if sliding and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+		if sliding and input == slideInput then
 			updateFromX(input.Position.X)
 		end
 	end)
@@ -1095,6 +1145,10 @@ masterFullBtn.MouseButton1Click:Connect(function()
 		end
 	end
 	syncParamAndFader()
+end)
+
+clearAllBtn.MouseButton1Click:Connect(function()
+	clearCurrentUniverseFixtures()
 end)
 
 -- Initial Setup
