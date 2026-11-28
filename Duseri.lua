@@ -1,5 +1,5 @@
 --!strict
--- DMX Controller UI (350x340) - Synced With Working Tes_Beam_UDP_DMXDATA Logic
+-- DMX Controller UI (350x340) - Full Build (ClaraS14 Color=8 No Speed, Car UDP_DMXDATA 3-Byte Buffer)
 
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -15,7 +15,7 @@ local MIN_VALUE = 0
 local MAX_VALUE = 255
 local SEND_THROTTLE = 0.03
 
---// Remote Resolver (Same priority as Tes_Beam_UDP_DMXDATA)
+--// Remote Resolver (Car UDP_DMXDATA -> ReplicatedStorage -> Workspace)
 local function isDmxRemote(obj: Instance): boolean
 	return obj:IsA("RemoteEvent") or obj:IsA("UnreliableRemoteEvent")
 end
@@ -74,7 +74,7 @@ task.spawn(function()
 	end
 end)
 
---// Fixture Profiles (Offset relative to Address: Address=1 -> CH 1=Pan, CH 2=Tilt, CH 7=Shutter, CH 8=Dimmer)
+--// Fixture Profiles
 local BarWashProfile = {
 	Group = "BarWash",
 	Span = 8,
@@ -94,13 +94,12 @@ local DEVICE_PROFILES: { [string]: { [string]: any } } = {
 		Span = 16,
 		Pan = 0,     -- Address + 0 (CH 1)
 		Tilt = 1,    -- Address + 1 (CH 2)
+		Gobo = 3,    -- Address + 3 (CH 4)
+		Prism = 4,   -- Address + 4 (CH 5)
+		Focus = 5,   -- Address + 5 (CH 6)
 		Shutter = 6, -- Address + 6 (CH 7)
 		Dimmer = 7,  -- Address + 7 (CH 8)
-		Color = 2,
-		Gobo = 3,
-		Prism = 4,
-		Focus = 5,
-		Speed = 8,
+		Color = 8,   -- Address + 8 (CH 9)
 	},
 	["Wallwasher_24X3W"] = BarWashProfile,
 	["StrobeBar_192_Segment"] = BarWashProfile,
@@ -137,7 +136,7 @@ local DEVICE_PROFILES: { [string]: { [string]: any } } = {
 }
 
 local DEVICE_PARAM_ORDER: { [string]: { string } } = {
-	["ClaraS14"] = { "Dimmer", "Shutter", "Pan", "Tilt", "Color", "Gobo", "Prism", "Focus", "Speed" },
+	["ClaraS14"] = { "Dimmer", "Shutter", "Pan", "Tilt", "Color", "Gobo", "Prism", "Focus" },
 	["Wallwasher_24X3W"] = { "Dimmer", "Shutter", "Red", "Green", "Blue", "Effect", "Effect2", "Speed" },
 	["StrobeBar_192_Segment"] = { "Dimmer", "Shutter", "Red", "Green", "Blue", "Effect", "Effect2", "Speed" },
 	["STROBE_1000W"] = { "Dimmer", "Shutter", "Effect", "Effect2", "Speed" },
